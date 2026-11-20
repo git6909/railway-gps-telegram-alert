@@ -1,0 +1,15 @@
+{
+  "name": "railway-gps-bot-controller",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-19",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "railway-gps-config",
+      "database_id": "776fd94c-553d-4ee4-9d84-9c93e6d3120c"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}
