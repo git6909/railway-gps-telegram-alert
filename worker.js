@@ -1,4 +1,3 @@
-
 const STALE = 1800000;
 const REPEAT = 1800000;
 
@@ -827,6 +826,33 @@ export default {
 
     if (u.pathname === "/ingest" && req.method === "POST") {
       return ingest(req, env, env.DB);
+    }
+
+    if (u.pathname === "/admin/register-webhook" && req.method === "POST") {
+      if (!env.TELEGRAM_WEBHOOK_SECRET ||
+          req.headers.get("X-Webhook-Setup-Key") !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return J({ ok: false, error: "Unauthorized" }, 401);
+      }
+      if (!env.TELEGRAM_BOT_TOKEN) return J({ ok: false, error: "Bot token missing" }, 503);
+      if (await setting(env.DB, "webhook_registered", "off") === "on") {
+        return J({ ok: false, error: "Already registered" }, 410);
+      }
+      const webhookUrl = new URL("/telegram/webhook", u.origin).toString();
+      const telegram = await fetch("https://api.telegram.org/bot" +
+        env.TELEGRAM_BOT_TOKEN + "/setWebhook", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            url: webhookUrl,
+            secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+            allowed_updates: ["message", "edited_message"],
+            drop_pending_updates: false
+          })
+        });
+      const result = await telegram.json();
+      if (result.ok) await set(env.DB, "webhook_registered", "on");
+      return J({ ok: !!result.ok, webhook_url: webhookUrl, telegram: result },
+        result.ok ? 200 : 502);
     }
 
     if (u.pathname === "/telegram/webhook" && req.method === "POST") {
