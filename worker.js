@@ -655,6 +655,37 @@ async function tick(env) {
 
   if (!chat) return;
 
+  const snapshot = await env.DB.prepare(`
+    SELECT d.device_id,d.section,d.patrol_no,t.end_time,t.end_ts,t.gps_on
+    FROM devices d
+    LEFT JOIN telemetry t ON t.device_id=d.device_id
+    LEFT JOIN ignored_devices i ON i.device_id=d.device_id
+    WHERE d.active=1 AND i.device_id IS NULL
+    ORDER BY d.section,d.patrol_no
+  `).all();
+
+  const staleCount = snapshot.results.filter(x =>
+    !x.end_ts || x.end_ts <= now - STALE
+  ).length;
+  const freshCount = snapshot.results.length - staleCount;
+  const summary = [
+    "RAILWAY GPS LIVE STATUS",
+    "Updated: " + new Date(now).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
+    "Devices: " + snapshot.results.length + " | Live: " + freshCount + " | Stale/No data: " + staleCount,
+    "",
+    ...snapshot.results.map(x => {
+      const stale = !x.end_ts || x.end_ts <= now - STALE;
+      const age = x.end_ts
+        ? Math.max(0, Math.floor((now - x.end_ts) / 60000)) + "m"
+        : "no data";
+      const gps = x.gps_on === 0 ? " GPS-OFF" : "";
+      return (stale ? "⚠️" : "🟢") + " " + x.section + " " + x.patrol_no +
+        " | " + x.device_id + " | " + age + gps;
+    })
+  ].join("\\n");
+
+  await send(env, chat, summary);
+
   const old = await env.DB.prepare(`
     SELECT t.device_id,d.section,d.patrol_no,
     t.end_time,t.last_alert_at,m.mobile
