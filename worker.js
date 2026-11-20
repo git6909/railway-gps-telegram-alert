@@ -642,10 +642,310 @@ async function ingest(req, env, db) {
   return J({ ok: true, received: rows.length });
 }
 
+
+function rilISTParts(date = new Date()) {
+  const p = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit",
+    day: "2-digit", hour: "2-digit", minute: "2-digit",
+    second: "2-digit", hourCycle: "h23"
+  }).formatToParts(date).reduce((o, x) => (o[x.type] = x.value, o), {});
+  return p;
+}
+
+function rilNightPeriod(date = new Date()) {
+  const p = rilISTParts(date);
+  const hour = Number(p.hour), minute = Number(p.minute);
+  const active = hour > 22 || (hour === 22 && minute >= 30) ||
+    hour < 7 || (hour === 7 && minute < 30);
+  const endDate = p.day + "/" + p.month + "/" + p.year;
+  const start = new Date(Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day)));
+  if (hour < 7 || (hour === 7 && minute < 30)) start.setUTCDate(start.getUTCDate() - 1);
+  const startDate = String(start.getUTCDate()).padStart(2, "0") + "/" +
+    String(start.getUTCMonth() + 1).padStart(2, "0") + "/" + start.getUTCFullYear();
+  return {
+    active, startDate, endDate, endTime: p.hour + ":" + p.minute,
+    label: startDate + " 22:30 – " + endDate + " " + p.hour + ":" + p.minute + " IST"
+  };
+}
+
+function rilHtmlText(value) {
+  return String(value || "")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<\/(?:div|p|li)>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&#x27;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/\s+/g, " ").trim();
+}
+
+function rilReadAttributes(tag) {
+  const attrs = {};
+  for (const m of String(tag).matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
+    attrs[m[1].toLowerCase()] = rilHtmlText(m[2] ?? m[3] ?? m[4] ?? "");
+  }
+  return attrs;
+}
+
+function rilCookiesFromResponse(response, jar) {
+  let cookies = [];
+  if (typeof response.headers.getSetCookie === "function") {
+    cookies = response.headers.getSetCookie();
+  } else {
+    const value = response.headers.get("set-cookie");
+    if (value) cookies = [value];
+  }
+  for (const value of cookies) {
+    const pair = String(value).split(";")[0].trim();
+    const at = pair.indexOf("=");
+    if (at > 0) jar.set(pair.slice(0, at), pair);
+  }
+}
+
+async function rilRequest(url, init, jar) {
+  let target = url;
+  let method = (init && init.method) || "GET";
+  let body = init && init.body;
+  const baseHeaders = new Headers((init && init.headers) || {});
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const headers = new Headers(baseHeaders);
+    if (jar.size) headers.set("cookie", Array.from(jar.values()).join("; "));
+    const response = await fetch(target, {
+      method, body, headers, redirect: "manual", cf: { cacheTtl: 0, cacheEverything: false }
+    });
+    rilCookiesFromResponse(response, jar);
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location) return response;
+    target = new URL(location, target).toString();
+    if (response.status === 303 ||
+        ((response.status === 301 || response.status === 302) && method === "POST")) {
+      method = "GET";
+      body = undefined;
+      baseHeaders.delete("content-type");
+    }
+  }
+  throw new Error("RILAPP redirect limit exceeded");
+}
+
+function rilGetTable(html, id) {
+  for (const match of String(html).matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)) {
+    const opening = match[0].slice(0, match[0].indexOf(">") + 1);
+    const attrs = rilReadAttributes(opening);
+    if (attrs.id === id) return match[0];
+  }
+  return "";
+}
+
+function rilRowsFromTable(tableHtml) {
+  const rows = [];
+  for (const rowMatch of String(tableHtml).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const rawCells = [];
+    const cells = [];
+    for (const cellMatch of rowMatch[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)) {
+      rawCells.push(cellMatch[1]);
+      cells.push(rilHtmlText(cellMatch[1]));
+    }
+    if (cells.length) rows.push({ cells, raw: rowMatch[0], rawCells });
+  }
+  return rows;
+}
+
+function rilGetDeviceIdFromLinks(rawHtml) {
+  for (const match of String(rawHtml).matchAll(/\bhref\s*=\s*["']([^"']*deviceid=[^"']*)["']/gi)) {
+    try {
+      const href = rilHtmlText(match[1]).replace(/&amp;/gi, "&");
+      const id = new URL(href, "https://ip3.rilapp.com/railways/").searchParams.get("deviceid");
+      if (id) return id.trim();
+    } catch (_) {}
+  }
+  return "";
+}
+
+function rilExtractGpsId(deviceText, rawRow) {
+  const match = String(deviceText || "").match(/(?:#|\()\s*(\d{4,})\b/);
+  if (match) return match[1];
+  return rilGetDeviceIdFromLinks(rawRow);
+}
+
+function rilParseDateTime(value) {
+  const match = String(value || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);
+  const hour = Number(match[4]), minute = Number(match[5]), second = Number(match[6] || 0);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
+  return Date.UTC(year, month - 1, day, hour, minute, second) - 330 * 60 * 1000;
+}
+
+function rilParseBattery(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  if (/low\s*battery/i.test(text)) return "Low Battery";
+  const match = text.match(/^(\d{1,3})(?:\s*%)?$/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return number >= 0 && number <= 100 ? number + "%" : null;
+}
+
+function rilExtractBatteryForRow(row, batteryIndex) {
+  const cells = row.cells;
+  if (!cells.length) return null;
+  if (batteryIndex >= 0 && cells[batteryIndex]) {
+    const parsed = rilParseBattery(cells[batteryIndex]);
+    if (parsed) return parsed;
+  }
+  for (let i = 0; i < cells.length - 1; i++) {
+    if (/^\d{13,16}$/.test(cells[i])) {
+      const parsed = rilParseBattery(cells[i + 1]);
+      if (parsed) return parsed;
+    }
+  }
+  for (const cell of cells) {
+    const parsed = rilParseBattery(cell);
+    if (parsed === "Low Battery") return parsed;
+  }
+  return null;
+}
+
+function rilParseBatteryPage(html) {
+  const map = new Map();
+  for (const tableMatch of String(html).matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)) {
+    const table = tableMatch[0];
+    const thead = /<thead\b[^>]*>([\s\S]*?)<\/thead>/i.exec(table);
+    const headers = thead
+      ? Array.from(thead[1].matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi), x => rilHtmlText(x[1]))
+      : [];
+    const batteryIndex = headers.findIndex(x => /battery|batt(?:ery)?\s*%/i.test(x));
+    for (const row of rilRowsFromTable(table)) {
+      if (!/liveMapGoogle\.php/i.test(row.raw) || !/deviceid=/i.test(row.raw)) continue;
+      const linkMatch = row.raw.match(/<a\b[^>]*href=["'][^"']*deviceid=[^"']*["'][^>]*>([\s\S]*?)<\/a>/i);
+      if (!linkMatch) continue;
+      const gpsId = rilExtractGpsId(rilHtmlText(linkMatch[1]), row.raw);
+      if (!/^\d{4,8}$/.test(gpsId)) continue;
+      const battery = rilExtractBatteryForRow(row, batteryIndex);
+      if (battery) map.set(gpsId, battery);
+    }
+  }
+  return map;
+}
+
+async function runRilappFeed(env) {
+  const period = rilNightPeriod();
+  if (!period.active) return { skipped: true, reason: "outside 22:30-07:30 IST" };
+  if (!env.RILAPP_USERNAME || !env.RILAPP_PASSWORD) {
+    return { skipped: true, reason: "RILAPP_USERNAME/RILAPP_PASSWORD secrets missing" };
+  }
+  if (!env.DB) throw new Error("D1 DB binding missing");
+  await init(env.DB);
+  const configured = await env.DB.prepare(
+    "SELECT device_id FROM devices WHERE active=1"
+  ).all();
+  if (!configured.results.length) return { skipped: true, reason: "no active devices configured" };
+  const knownIds = new Set(configured.results.map(x => String(x.device_id)));
+  const jar = new Map();
+  const base = "https://ip3.rilapp.com/railways/";
+  const loginUrl = base + "login.php";
+  const reportUrl = base + "patrollingReport.php";
+  const batteryUrl = base + "dashboard_deviceListOnly.php";
+
+  const login = await rilRequest(loginUrl, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      username: env.RILAPP_USERNAME,
+      password: env.RILAPP_PASSWORD
+    }).toString()
+  }, jar);
+  const loginHtml = await login.text();
+  if (!login.ok || (login.url.includes("login.php") && !/logout\.php/i.test(loginHtml))) {
+    throw new Error("RILAPP login rejected (HTTP " + login.status + ")");
+  }
+
+  const query = new URLSearchParams({
+    fdate: period.startDate,
+    ftime: "22:30",
+    tdate: period.endDate,
+    ttime: period.endTime,
+    category: "-PM",
+    Submit: "Update"
+  });
+  const report = await rilRequest(reportUrl + "?" + query.toString(), {}, jar);
+  const reportHtml = await report.text();
+  if (!report.ok || /login\.php/i.test(report.url) ||
+      (/type=["']password["']/i.test(reportHtml) && /login|sign.?in/i.test(reportHtml))) {
+    throw new Error("RILAPP report session unavailable (HTTP " + report.status + ")");
+  }
+  const reportTable = rilGetTable(reportHtml, "example");
+  if (!reportTable) throw new Error("RILAPP report table #example not found");
+  const reportRows = rilRowsFromTable(reportTable).slice(1);
+  const latest = new Map();
+  for (const row of reportRows) {
+    const c = row.cells;
+    if (c.length <= 6) continue;
+    const gpsId = rilExtractGpsId(c[1], row.raw);
+    if (!knownIds.has(gpsId)) continue;
+    const endTs = rilParseDateTime(c[4]);
+    if (!endTs) continue;
+    const old = latest.get(gpsId);
+    if (!old || endTs > old.end_ts) {
+      latest.set(gpsId, {
+        device_id: gpsId,
+        start_time: c[2] || null,
+        end_time: c[4] || null,
+        end_ts: endTs,
+        end_address: c[5] || null,
+        km_run: c[6] || null
+      });
+    }
+  }
+  if (!latest.size) {
+    throw new Error("No report rows matched configured GPS IDs in #example; ingestion stopped safely");
+  }
+
+  const batteryResponse = await rilRequest(batteryUrl, {}, jar);
+  if (!batteryResponse.ok) throw new Error("RILAPP battery page HTTP " + batteryResponse.status);
+  const batteryMap = rilParseBatteryPage(await batteryResponse.text());
+  for (const [id, item] of latest) {
+    if (batteryMap.has(id)) item.battery = batteryMap.get(id);
+  }
+
+  const sql = "INSERT INTO telemetry(device_id,end_time,end_ts,km_run,end_address,battery,start_time,payload,received_at) " +
+    "VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) " +
+    "ON CONFLICT(device_id) DO UPDATE SET " +
+    "end_time=COALESCE(excluded.end_time,telemetry.end_time)," +
+    "end_ts=COALESCE(excluded.end_ts,telemetry.end_ts)," +
+    "km_run=COALESCE(excluded.km_run,telemetry.km_run)," +
+    "end_address=COALESCE(excluded.end_address,telemetry.end_address)," +
+    "battery=COALESCE(excluded.battery,telemetry.battery)," +
+    "start_time=COALESCE(excluded.start_time,telemetry.start_time)," +
+    "payload=excluded.payload,received_at=CURRENT_TIMESTAMP";
+  const statements = Array.from(latest.values(), item =>
+    env.DB.prepare(sql).bind(
+      item.device_id, item.end_time, item.end_ts, item.km_run,
+      item.end_address, item.battery || null, item.start_time,
+      JSON.stringify({ ...item, window: period.label, battery_matches: batteryMap.size })
+    )
+  );
+  await env.DB.batch(statements);
+  await set(env.DB, "last_ingest", new Date().toISOString());
+  await set(env.DB, "last_rilapp_rows", String(latest.size));
+  await set(env.DB, "last_rilapp_batteries", String(batteryMap.size));
+  return { ok: true, rows: latest.size, batteries: batteryMap.size, window: period.label };
+}
+
 async function tick(env) {
   if (!env.DB) throw Error("DB binding missing");
 
   await init(env.DB);
+
+  if (!rilNightPeriod().active) return;
 
   if (await setting(env.DB, "monitor", "off") !== "on" ||
       !env.TELEGRAM_BOT_TOKEN) return;
@@ -735,7 +1035,7 @@ End: ${x.end_time || "no data"} | Phone: ${x.mobile ? MASK(x.mobile) : "not mapp
   const today = get("year") + "-" + get("month") + "-" + get("day");
 
   const night =
-    hh >= 23 || hh < 7 || (hh === 7 && mm <= 15);
+    hh > 22 || (hh === 22 && mm >= 30) || hh < 7 || (hh === 7 && mm < 30);
 
   if (night) {
     const off = await env.DB.prepare(`
@@ -912,6 +1212,15 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(tick(env));
+    ctx.waitUntil((async () => {
+      try {
+        const result = await runRilappFeed(env);
+        if (result && result.ok) console.log('RILAPP feed updated', result.rows, 'rows; batteries:', result.batteries);
+      } catch (error) {
+        console.error('RILAPP feed failed:', error && error.message ? error.message : String(error));
+      }
+      try { await tick(env); }
+      catch (error) { console.error('GPS alert tick failed:', error && error.message ? error.message : String(error)); }
+    })());
   }
 };
