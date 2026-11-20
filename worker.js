@@ -1134,7 +1134,11 @@ export default {
           telegram_token: !!env.TELEGRAM_BOT_TOKEN,
           admin_configured: !!env.TELEGRAM_ADMIN_ID,
           ingest_secret: !!env.INGEST_SECRET,
-          webhook_secret: !!env.TELEGRAM_WEBHOOK_SECRET
+          webhook_secret: !!env.TELEGRAM_WEBHOOK_SECRET,
+          integration_version: "rilapp-night-feed-v1",
+          rilapp_configured: !!(env.RILAPP_USERNAME && env.RILAPP_PASSWORD),
+          last_rilapp_rows: await setting(env.DB, "last_rilapp_rows", "never"),
+          last_rilapp_batteries: await setting(env.DB, "last_rilapp_batteries", "never")
         });
 
       } catch (e) {
