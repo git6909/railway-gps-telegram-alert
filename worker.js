@@ -89,7 +89,7 @@ async function seedTelemetry(db, id) {
   ).bind(id).run();
 }
 
-async function send(env, chat, text) {
+async function send(env, chat, text, entities = []) {
   if (!env.TELEGRAM_BOT_TOKEN || !chat) return false;
 
   const r = await fetch(
@@ -102,6 +102,7 @@ async function send(env, chat, text) {
       body: JSON.stringify({
         chat_id: chat,
         text,
+        ...(entities.length ? { entities } : {}),
         disable_web_page_preview: true
       })
     }
@@ -116,6 +117,15 @@ async function send(env, chat, text) {
   return !!d.ok;
 }
 
+function formatDialableMobile(value) {
+  const raw = String(value || "").trim();
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 10) return "+91" + digits;
+  if (digits.length === 11 && digits.startsWith("0")) return "+91" + digits.slice(1);
+  if (digits.length === 12 && digits.startsWith("91")) return "+" + digits;
+  if (raw.startsWith("+") && digits.length >= 8 && digits.length <= 15) return "+" + digits;
+  return "";
+}
 async function cmd(env, db, msg) {
   const chat = msg.chat?.id;
   const from = S(msg.from?.id);
@@ -998,13 +1008,17 @@ async function tick(env) {
   `).bind(now - STALE, now - REPEAT).all();
 
   if (old.results.length) {
-    const ok = await send(env, chat,
-      "GPS STALE ALERT (30+ min/no data)\n" +
-      old.results.map(x =>
-        `${x.section} ${x.patrol_no} | ${x.device_id}
-End: ${x.end_time || "no data"} | Phone: ${x.mobile ? MASK(x.mobile) : "not mapped"}`
-      ).join("\n")
-    );
+    const staleLines = ["⚠️ GPS STALE ALERT (30+ min/no data)"];
+    const staleEntities = [];
+    for (const x of old.results) {
+      const phone = formatDialableMobile(x.mobile);
+      const line = x.section + " " + x.patrol_no + " | " + x.device_id +
+        "\nEnd: " + (x.end_time || "no data") + " | Phone: " + (phone || "not mapped");
+      const offset = staleLines.join("\n").length + 1 + line.lastIndexOf(phone);
+      staleLines.push(line);
+      if (phone) staleEntities.push({ type: "phone_number", offset, length: phone.length });
+    }
+    const ok = await send(env, chat, staleLines.join("\n"), staleEntities);
 
     if (ok) {
       await env.DB.batch(old.results.map(x =>
@@ -1050,12 +1064,16 @@ End: ${x.end_time || "no data"} | Phone: ${x.mobile ? MASK(x.mobile) : "not mapp
     `).bind(now - REPEAT).all();
 
     if (off.results.length) {
-      const ok = await send(env, chat,
-        "NIGHT GPS OFF ALERT\n" +
-        off.results.map(x =>
-          `${x.section} ${x.patrol_no} | ${x.device_id} | ${x.mobile ? MASK(x.mobile) : "no mobile mapping"}`
-        ).join("\n")
-      );
+      const offLines = ["⚠️ GPS OFF ALERT"];
+      const offEntities = [];
+      for (const x of off.results) {
+        const phone = formatDialableMobile(x.mobile);
+        const line = x.section + " " + x.patrol_no + " | " + x.device_id + " | Phone: " + (phone || "not mapped");
+        const offset = offLines.join("\n").length + 1 + line.lastIndexOf(phone);
+        offLines.push(line);
+        if (phone) offEntities.push({ type: "phone_number", offset, length: phone.length });
+      }
+      const ok = await send(env, chat, offLines.join("\n"), offEntities);
 
       if (ok) {
         await env.DB.batch(off.results.map(x =>
