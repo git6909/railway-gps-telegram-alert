@@ -976,51 +976,64 @@ async function tick(env) {
     !x.end_ts || x.end_ts <= now - STALE
   ).length;
   const freshCount = snapshot.results.length - staleCount;
-  const summary = [
-    "RAILWAY GPS LIVE STATUS",
-    "Updated: " + new Date(now).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
-    "Devices: " + snapshot.results.length + " | Live: " + freshCount + " | Stale/No data: " + staleCount,
-    snapshot.results.length === 0 ? "NO ACTIVE DEVICES" : (staleCount === 0 ? "ALL DEVICES WORKING WELL" : "ATTENTION REQUIRED"),
-    "",
-    ...snapshot.results.map(x => {
-      const stale = !x.end_ts || x.end_ts <= now - STALE;
-      const age = x.end_ts
-        ? Math.max(0, Math.floor((now - x.end_ts) / 60000)) + "m"
-        : "no data";
-      const gps = x.gps_on === 0 ? " GPS-OFF" : "";
-      return (stale ? "⚠️" : "🟢") + " " + x.section + " " + x.patrol_no +
-        " | " + x.device_id + " | " + age + gps;
-    })
-  ].join("\n");
-
-  await send(env, chat, summary);
+  if (snapshot.results.length > 0 && staleCount === 0) {
+    await send(env, chat,
+      "\u2705 ALL IS WELL\\n" +
+      "All " + snapshot.results.length + " active devices updated within the last 30 minutes."
+    );
+  } else if (snapshot.results.length === 0) {
+    await send(env, chat, "NO ACTIVE DEVICES CONFIGURED");
+  }
 
   const old = await env.DB.prepare(`
     SELECT t.device_id,d.section,d.patrol_no,
-    t.end_time,t.last_alert_at,m.mobile
+    t.start_time,t.end_time,t.end_ts,t.km_run,t.end_address,
+    t.battery,t.gps_on,t.last_alert_at,m.mobile,m.person_name
     FROM telemetry t
     JOIN devices d ON d.device_id=t.device_id
-    LEFT JOIN ignored_devices i ON i.device_id=t.device_id
-    LEFT JOIN mobile_map m ON m.device_id=t.device_id
+    LEFT JOIN ignored_devices i ON i.device_id=d.device_id
+    LEFT JOIN mobile_map m ON m.device_id=d.device_id
     WHERE d.active=1 AND i.device_id IS NULL
     AND (t.end_ts IS NULL OR t.end_ts<=?)
     AND (t.last_alert_at IS NULL OR t.last_alert_at<=?)
-    ORDER BY t.end_ts LIMIT 70
+    ORDER BY CASE d.section WHEN 'RJK' THEN 1 WHEN 'RG' THEN 2 WHEN 'CH' THEN 3 ELSE 4 END,
+    d.patrol_no LIMIT 70
   `).bind(now - STALE, now - REPEAT).all();
 
   if (old.results.length) {
-    const staleLines = ["⚠️ GPS STALE ALERT (30+ min/no data)"];
+    const staleLines = ["\u26a0\ufe0f GPS STALE ALERT - 30 MINUTES OR MORE"];
     const staleEntities = [];
-    for (const x of old.results) {
-      const phone = formatDialableMobile(x.mobile);
-      const line = x.section + " " + x.patrol_no + " | " + x.device_id +
-        "\nEnd: " + (x.end_time || "no data") + " | Phone: " + (phone || "not mapped");
-      const offset = staleLines.join("\n").length + 1 + line.lastIndexOf(phone);
-      staleLines.push(line);
-      if (phone) staleEntities.push({ type: "phone_number", offset, length: phone.length });
+    for (const section of ["RJK", "RG", "CH"]) {
+      const items = old.results.filter(x => x.section === section);
+      if (!items.length) continue;
+      staleLines.push("", section);
+      for (const x of items) {
+        const phone = formatDialableMobile(x.mobile);
+        const age = x.end_ts
+          ? Math.max(0, Math.floor((now - x.end_ts) / 60000)) + " minutes"
+          : "No GPS data";
+        const details = [
+          "\u26a0\ufe0f " + x.patrol_no + " | GPS ID: " + x.device_id,
+          "Name: " + (x.person_name || "Not mapped"),
+          "Start Time: " + (x.start_time || "-"),
+          "Last Update: " + (x.end_time || "No data") + " (" + age + ")",
+          "KM Run: " + (x.km_run || "-"),
+          "Address: " + (x.end_address || "-"),
+          "Battery: " + (x.battery || "-"),
+          "GPS: " + (x.gps_on === 0 ? "OFF" : x.gps_on === 1 ? "ON" : "Unknown"),
+          "Mobile: " + (phone || "Not mapped")
+        ];
+        for (const line of details) {
+          if (phone && line === "Mobile: " + phone) {
+            const offset = staleLines.join("\\n").length + 1 + "Mobile: ".length;
+            staleEntities.push({ type: "phone_number", offset, length: phone.length });
+          }
+          staleLines.push(line);
+        }
+        staleLines.push("");
+      }
     }
-    const ok = await send(env, chat, staleLines.join("\n"), staleEntities);
-
+    const ok = await send(env, chat, staleLines.join("\\n").trim(), staleEntities);
     if (ok) {
       await env.DB.batch(old.results.map(x =>
         env.DB.prepare(
