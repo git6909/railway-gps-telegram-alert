@@ -659,7 +659,7 @@ function rilNightPeriod(date = new Date()) {
     hour < 7 || (hour === 7 && minute < 30);
   const endDate = p.day + "/" + p.month + "/" + p.year;
   const start = new Date(Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day)));
-  if (hour < 7 || (hour === 7 && minute < 30)) start.setUTCDate(start.getUTCDate() - 1);
+  start.setUTCDate(start.getUTCDate() - 1);
   const startDate = String(start.getUTCDate()).padStart(2, "0") + "/" +
     String(start.getUTCMonth() + 1).padStart(2, "0") + "/" + start.getUTCFullYear();
   return {
@@ -838,7 +838,6 @@ function rilParseBatteryPage(html) {
 
 async function runRilappFeed(env) {
   const period = rilNightPeriod();
-  if (!period.active) return { skipped: true, reason: "outside 22:30-07:30 IST" };
   if (!env.RILAPP_USERNAME || !env.RILAPP_PASSWORD) {
     return { skipped: true, reason: "RILAPP_USERNAME/RILAPP_PASSWORD secrets missing" };
   }
@@ -945,7 +944,6 @@ async function tick(env) {
 
   await init(env.DB);
 
-  if (!rilNightPeriod().active) return;
 
   if (await setting(env.DB, "monitor", "off") !== "on" ||
       !env.TELEGRAM_BOT_TOKEN) return;
@@ -1037,7 +1035,7 @@ End: ${x.end_time || "no data"} | Phone: ${x.mobile ? MASK(x.mobile) : "not mapp
   const night =
     hh > 22 || (hh === 22 && mm >= 30) || hh < 7 || (hh === 7 && mm < 30);
 
-  if (night) {
+  {
     const off = await env.DB.prepare(`
       SELECT t.device_id,d.section,d.patrol_no,
       t.last_night_alert_at,m.mobile
