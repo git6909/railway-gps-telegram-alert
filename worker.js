@@ -972,74 +972,85 @@ async function tick(env) {
     ORDER BY d.section,d.patrol_no
   `).all();
 
-  const staleCount = snapshot.results.filter(x =>
-    !x.end_ts || x.end_ts <= now - STALE
-  ).length;
-  const freshCount = snapshot.results.length - staleCount;
-  if (snapshot.results.length > 0 && staleCount === 0) {
+  const staleDevices = snapshot.results.filter(x =>
+    !x.end_ts || Number(x.end_ts) < now - STALE
+  );
+
+  if (snapshot.results.length > 0 && staleDevices.length === 0) {
     await send(env, chat,
-      "\u2705 ALL IS WELL\\n" +
-      "All " + snapshot.results.length + " active devices updated within the last 30 minutes."
+      "\u2705 ALL IS WELL\n" +
+      "All " + snapshot.results.length +
+      " active devices updated within the last 30 minutes."
     );
   } else if (snapshot.results.length === 0) {
     await send(env, chat, "NO ACTIVE DEVICES CONFIGURED");
-  }
+  } else {
+    const old = await env.DB.prepare(
+      "SELECT d.device_id,d.section,d.patrol_no," +
+      "t.start_time,t.end_time,t.end_ts,t.km_run,t.end_address," +
+      "t.battery,t.gps_on,t.last_alert_at,m.mobile,m.person_name " +
+      "FROM devices d " +
+      "LEFT JOIN telemetry t ON t.device_id=d.device_id " +
+      "LEFT JOIN ignored_devices i ON i.device_id=d.device_id " +
+      "LEFT JOIN mobile_map m ON m.device_id=d.device_id " +
+      "WHERE d.active=1 AND i.device_id IS NULL " +
+      "AND (t.end_ts IS NULL OR t.end_ts < ?) " +
+      "AND (t.last_alert_at IS NULL OR t.last_alert_at <= ?) " +
+      "ORDER BY CASE d.section WHEN 'RJK' THEN 1 WHEN 'RG' THEN 2 " +
+      "WHEN 'CH' THEN 3 ELSE 4 END,d.patrol_no LIMIT 70"
+    ).bind(now - STALE, now - REPEAT).all();
 
-  const old = await env.DB.prepare(`
-    SELECT t.device_id,d.section,d.patrol_no,
-    t.start_time,t.end_time,t.end_ts,t.km_run,t.end_address,
-    t.battery,t.gps_on,t.last_alert_at,m.mobile,m.person_name
-    FROM telemetry t
-    JOIN devices d ON d.device_id=t.device_id
-    LEFT JOIN ignored_devices i ON i.device_id=d.device_id
-    LEFT JOIN mobile_map m ON m.device_id=d.device_id
-    WHERE d.active=1 AND i.device_id IS NULL
-    AND (t.end_ts IS NULL OR t.end_ts<=?)
-    AND (t.last_alert_at IS NULL OR t.last_alert_at<=?)
-    ORDER BY CASE d.section WHEN 'RJK' THEN 1 WHEN 'RG' THEN 2 WHEN 'CH' THEN 3 ELSE 4 END,
-    d.patrol_no LIMIT 70
-  `).bind(now - STALE, now - REPEAT).all();
+    if (old.results.length) {
+      const staleLines = ["\u26a0\ufe0f GPS UPDATE OLDER THAN 30 MINUTES"];
+      const staleEntities = [];
 
-  if (old.results.length) {
-    const staleLines = ["\u26a0\ufe0f GPS STALE ALERT - 30 MINUTES OR MORE"];
-    const staleEntities = [];
-    for (const section of ["RJK", "RG", "CH"]) {
-      const items = old.results.filter(x => x.section === section);
-      if (!items.length) continue;
-      staleLines.push("", section);
-      for (const x of items) {
-        const phone = formatDialableMobile(x.mobile);
-        const age = x.end_ts
-          ? Math.max(0, Math.floor((now - x.end_ts) / 60000)) + " minutes"
-          : "No GPS data";
-        const details = [
-          "\u26a0\ufe0f " + x.patrol_no + " | GPS ID: " + x.device_id,
-          "Name: " + (x.person_name || "Not mapped"),
-          "Start Time: " + (x.start_time || "-"),
-          "Last Update: " + (x.end_time || "No data") + " (" + age + ")",
-          "KM Run: " + (x.km_run || "-"),
-          "Address: " + (x.end_address || "-"),
-          "Battery: " + (x.battery || "-"),
-          "GPS: " + (x.gps_on === 0 ? "OFF" : x.gps_on === 1 ? "ON" : "Unknown"),
-          "Mobile: " + (phone || "Not mapped")
-        ];
-        for (const line of details) {
-          if (phone && line === "Mobile: " + phone) {
-            const offset = staleLines.join("\\n").length + 1 + "Mobile: ".length;
-            staleEntities.push({ type: "phone_number", offset, length: phone.length });
+      for (const section of ["RJK", "RG", "CH"]) {
+        const items = old.results.filter(x => x.section === section);
+        if (!items.length) continue;
+        staleLines.push("", section);
+
+        for (const x of items) {
+          const phone = formatDialableMobile(x.mobile);
+          const age = x.end_ts
+            ? Math.floor((now - Number(x.end_ts)) / 60000) + " minutes"
+            : "No GPS data";
+          const details = [
+            "\u26a0\ufe0f " + x.patrol_no + " | GPS ID: " + x.device_id,
+            "Name: " + (x.person_name || "Not mapped"),
+            "Start Time: " + (x.start_time || "-"),
+            "Last Update: " + (x.end_time || "No data") + " (" + age + ")",
+            "KM Run: " + (x.km_run || "-"),
+            "Address: " + (x.end_address || "-"),
+            "Battery: " + (x.battery || "-"),
+            "GPS: " + (x.gps_on === 0 ? "OFF" : x.gps_on === 1 ? "ON" : "Unknown"),
+            "Mobile: " + (phone || "Not mapped")
+          ];
+
+          for (const line of details) {
+            if (phone && line === "Mobile: " + phone) {
+              const offset = staleLines.join("\n").length + 1 + "Mobile: ".length;
+              staleEntities.push({
+                type: "phone_number",
+                offset,
+                length: phone.length
+              });
+            }
+            staleLines.push(line);
           }
-          staleLines.push(line);
+          staleLines.push("");
         }
-        staleLines.push("");
       }
-    }
-    const ok = await send(env, chat, staleLines.join("\\n").trim(), staleEntities);
-    if (ok) {
-      await env.DB.batch(old.results.map(x =>
-        env.DB.prepare(
-          "UPDATE telemetry SET last_alert_at=? WHERE device_id=?"
-        ).bind(now, x.device_id)
-      ));
+
+      const ok = await send(
+        env, chat, staleLines.join("\n").trim(), staleEntities
+      );
+      if (ok) {
+        await env.DB.batch(old.results.map(x =>
+          env.DB.prepare(
+            "UPDATE telemetry SET last_alert_at=? WHERE device_id=?"
+          ).bind(now, x.device_id)
+        ));
+      }
     }
   }
 
