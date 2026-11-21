@@ -980,6 +980,7 @@ async function tick(env) {
     "RAILWAY GPS LIVE STATUS",
     "Updated: " + new Date(now).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
     "Devices: " + snapshot.results.length + " | Live: " + freshCount + " | Stale/No data: " + staleCount,
+    snapshot.results.length === 0 ? "NO ACTIVE DEVICES" : (staleCount === 0 ? "ALL DEVICES WORKING WELL" : "ATTENTION REQUIRED"),
     "",
     ...snapshot.results.map(x => {
       const stale = !x.end_ts || x.end_ts <= now - STALE;
@@ -990,7 +991,7 @@ async function tick(env) {
       return (stale ? "⚠️" : "🟢") + " " + x.section + " " + x.patrol_no +
         " | " + x.device_id + " | " + age + gps;
     })
-  ].join("\\n");
+  ].join("\n");
 
   await send(env, chat, summary);
 
