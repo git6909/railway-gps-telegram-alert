@@ -1,5 +1,5 @@
 const STALE = 1800000;
-const REPEAT = 1800000;
+const REPEAT = 0;
 
 const SQL = [
   `CREATE TABLE IF NOT EXISTS devices (
