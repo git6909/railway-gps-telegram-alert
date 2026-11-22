@@ -158,7 +158,7 @@ async function cmd(env, db, msg) {
 `Railway GPS Controller
 
 /devices [RJK|RG|CH]
-/adddevice SECTION P# ID
+/linkdevice SECTION P# ID
 /updatedevice ID SECTION P#
 /removedevice ID
 /ignore ID
@@ -216,14 +216,14 @@ Last feed: ${await setting(db, "last_ingest", "never")}`);
       return;
     }
 
-    if (c === "adddevice") {
+    if (c === "linkdevice") {
       const [s, pat, d] = p;
 
       if (!SEC(s) ||
           !/^P\d{1,2}$/i.test(pat || "") ||
           !ID(d)) {
         await send(env, chat,
-          "Format: /adddevice RJK P11 88336");
+          "Format: /linkdevice RJK P11 88336");
         return;
       }
 
@@ -266,7 +266,7 @@ Last feed: ${await setting(db, "last_ingest", "never")}`);
 
       await send(env, chat,
         r.meta.changes ? "Updated " + d :
-        "Device not found; use /adddevice."
+        "Device not found; use /linkdevice."
       );
 
       return;
