@@ -990,10 +990,9 @@ async function runRilappFeed(env) {
 
   const query = new URLSearchParams({
     fdate: period.startDate,
-    ftime: "22:30",
+    ftime: "23:00",
     tdate: period.endDate,
     ttime: period.endTime,
-    category: "-PM",
     Submit: "Update"
   });
   const report = await rilRequest(reportUrl + "?" + query.toString(), {}, jar);
