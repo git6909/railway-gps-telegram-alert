@@ -193,7 +193,7 @@ async function cmd(env, db, msg) {
           await send(env, chat, "RILAPP SYNC SKIPPED: " + (result.reason || "unknown reason"));
         }
       } catch (error) {
-        const message = String(error && error.message ? error.message : error).slice(0, 700);
+        const message = String(error && error.message ? error.message : error).slice(0, 3500);
         await set(db, "last_feed_error", message);
         await send(env, chat, "RILAPP SYNC FAILED\n" + message);
       }
@@ -1054,7 +1054,8 @@ async function runRilappFeed(env) {
       ", tableHTMLchars=" + reportTable.length +
       ", reportHTMLchars=" + reportHtml.length +
       ", scriptRefs=" + Array.from(reportHtml.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi), m => m[1]).slice(0, 12).join(";") +
-      ", ajaxHints=" + Array.from(reportHtml.matchAll(/.{0,100}(?:ajax|serverSide|dataSrc|fetch\s*\(|XMLHttpRequest).{0,180}/gi), m => m[0].replace(/\s+/g, " ")).slice(0, 8).join(" || ").slice(0, 1000) +
+      ", dataTableConfig=" + Array.from(reportHtml.matchAll(/.{0,180}(?:DataTable|dataTable|sAjaxSource|ajax\s*:|serverSide|processing\s*:).{0,260}/gi), m => m[0].replace(/\s+/g, " ")).slice(0, 8).join(" || ").slice(0, 1600) +
+      ", ajaxHints=" + Array.from(reportHtml.matchAll(/.{0,100}(?:ajax|serverSide|dataSrc|fetch\s*\(|XMLHttpRequest).{0,180}/gi), m => m[0].replace(/\s+/g, " ")).slice(0, 8).join(" || ").slice(0, 800) +
       ", knownIdsInHTML=" + Array.from(knownIds).filter(id => reportHtml.includes(id)).slice(0, 20).join(",") +
       ", sample=" + sampleDevices.join("; ").slice(0, 500)
     );
