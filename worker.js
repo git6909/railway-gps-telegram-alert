@@ -158,7 +158,7 @@ async function cmd(env, db, msg) {
 `Railway GPS Controller
 
 /devices [RJK|RG|CH]
-/linkdevice SECTION P# ID
+/linkdevice SECTION P# ID\n/bulklink SECTION (then P# ID on each line)
 /updatedevice ID SECTION P#
 /removedevice ID
 /ignore ID
@@ -242,6 +242,59 @@ Last feed: ${await setting(db, "last_ingest", "never")}`);
       await send(env, chat, "Saved " + s.toUpperCase() +
         " " + pat.toUpperCase() + " " + d);
 
+      return;
+    }
+
+    if (c === "bulklink") {
+      const section = S(p[0]).toUpperCase();
+      if (!SEC(section)) {
+        await send(env, chat,
+          "Format:\n/bulklink CH\nP1 88338\nP2 88303");
+        return;
+      }
+
+      const rows = full.split(/\r?\n/).slice(1)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => line.split(/\s+/));
+
+      if (!rows.length || rows.length > 70 ||
+          rows.some(row => row.length !== 2 ||
+            !/^P\d{1,2}$/i.test(row[0]) || !ID(row[1]))) {
+        await send(env, chat,
+          "Invalid list. Send 1-70 lines, each as P# DEVICE_ID.\nExample:\n/bulklink CH\nP1 88338\nP2 88303");
+        return;
+      }
+
+      const patrols = rows.map(row => row[0].toUpperCase());
+      const ids = rows.map(row => row[1]);
+      if (new Set(patrols).size !== patrols.length ||
+          new Set(ids).size !== ids.length) {
+        await send(env, chat,
+          "Duplicate patrol number or device ID found. No devices were changed.");
+        return;
+      }
+
+      const statements = [];
+      for (const [patrol, device] of rows.map(row => [row[0].toUpperCase(), row[1]])) {
+        statements.push(db.prepare(`
+          INSERT INTO devices(device_id,section,patrol_no,active,updated_at)
+          VALUES(?,?,?,1,CURRENT_TIMESTAMP)
+          ON CONFLICT(device_id) DO UPDATE SET
+          section=excluded.section,
+          patrol_no=excluded.patrol_no,
+          active=1,
+          updated_at=CURRENT_TIMESTAMP
+        `).bind(device, section, patrol));
+        statements.push(db.prepare(
+          "INSERT OR IGNORE INTO telemetry(device_id) VALUES(?)"
+        ).bind(device));
+      }
+
+      await db.batch(statements);
+      await send(env, chat,
+        "Successfully linked " + rows.length + " devices to " + section + " SECTION.\n\n" +
+        rows.map(row => section + " " + row[0].toUpperCase() + " " + row[1]).join("\n"));
       return;
     }
 
