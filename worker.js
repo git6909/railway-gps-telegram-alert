@@ -173,7 +173,30 @@ async function cmd(env, db, msg) {
 /monitor on|off
 /stale [MINUTES]
 /pending
-/health`);
+/health
+/sync (manual RILAPP refresh)`);
+      return;
+    }
+
+    if (c === "sync") {
+      await send(env, chat, "Starting manual RILAPP sync...");
+      try {
+        const result = await runRilappFeed(env);
+        if (result && result.ok) {
+          await set(db, "last_feed_error", "");
+          await send(env, chat,
+            "RILAPP SYNC SUCCESS\nRows updated: " + result.rows +
+            "\nBattery matches: " + result.batteries +
+            "\nWindow: " + result.window
+          );
+        } else {
+          await send(env, chat, "RILAPP SYNC SKIPPED: " + (result.reason || "unknown reason"));
+        }
+      } catch (error) {
+        const message = String(error && error.message ? error.message : error).slice(0, 700);
+        await set(db, "last_feed_error", message);
+        await send(env, chat, "RILAPP SYNC FAILED\n" + message);
+      }
       return;
     }
 
@@ -189,7 +212,10 @@ Active devices: ${n.n}
 Monitoring: ${await setting(db, "monitor", "off")}
 Bot token: ${env.TELEGRAM_BOT_TOKEN ? "configured" : "missing"}
 Admin ID: ${env.TELEGRAM_ADMIN_ID ? "configured" : "missing"}
-Last feed: ${await setting(db, "last_ingest", "never")}`);
+Last feed: ${await setting(db, "last_ingest", "never")}
+Last feed rows: ${await setting(db, "last_rilapp_rows", "unknown")}
+Last attempt: ${await setting(db, "last_feed_attempt", "unknown")}
+Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
 
       return;
     }
@@ -932,6 +958,7 @@ function rilParseBatteryPage(html) {
 
 async function runRilappFeed(env) {
   const period = rilNightPeriod();
+  if (env.DB) await set(env.DB, "last_feed_attempt", new Date().toISOString());
   if (!env.RILAPP_USERNAME || !env.RILAPP_PASSWORD) {
     return { skipped: true, reason: "RILAPP_USERNAME/RILAPP_PASSWORD secrets missing" };
   }
@@ -1041,6 +1068,7 @@ async function runRilappFeed(env) {
   );
   await env.DB.batch(statements);
   await set(env.DB, "last_ingest", new Date().toISOString());
+  await set(env.DB, "last_feed_error", "");
   await set(env.DB, "last_rilapp_rows", String(latest.size));
   await set(env.DB, "last_rilapp_batteries", String(batteryMap.size));
   return { ok: true, rows: latest.size, batteries: batteryMap.size, window: period.label };
@@ -1361,7 +1389,9 @@ export default {
         const result = await runRilappFeed(env);
         if (result && result.ok) console.log('RILAPP feed updated', result.rows, 'rows; batteries:', result.batteries);
       } catch (error) {
-        console.error('RILAPP feed failed:', error && error.message ? error.message : String(error));
+        const message = String(error && error.message ? error.message : error).slice(0, 700);
+        try { await set(env.DB, "last_feed_error", message); } catch (_) {}
+        console.error('RILAPP feed failed:', message);
       }
       try { await tick(env); }
       catch (error) { console.error('GPS alert tick failed:', error && error.message ? error.message : String(error)); }
