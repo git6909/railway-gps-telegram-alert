@@ -170,6 +170,7 @@ async function cmd(env, db, msg) {
 /unmapmobile ID
 /status ID
 /deviceinfo ID
+/s RJK|RG|CH (section-wise live status)
 /monitor on|off
 /stale [MINUTES]
 /pending
@@ -574,6 +575,59 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           : "No mobile mapped."
       );
 
+      return;
+    }
+
+    if (c === "s") {
+      const section = S(id).toUpperCase();
+      if (!SEC(section)) {
+        await send(env, chat, "Use /s RJK or /s RG or /s CH");
+        return;
+      }
+
+      const result = await db.prepare(`
+        SELECT d.device_id,d.section,d.patrol_no,d.active,
+        m.mobile,m.person_name,t.end_time,t.end_ts,t.km_run,
+        t.end_address,t.battery,t.gps_on,t.received_at
+        FROM devices d
+        LEFT JOIN mobile_map m ON m.device_id=d.device_id
+        LEFT JOIN telemetry t ON t.device_id=d.device_id
+        WHERE d.active=1 AND d.section=?
+        ORDER BY d.patrol_no,d.device_id
+      `).bind(section).all();
+
+      if (!result.results.length) {
+        await send(env, chat, "No active devices found in " + section + " SECTION.");
+        return;
+      }
+
+      const lines = result.results.map(r => {
+        const age = r.end_ts
+          ? Math.max(0, Math.round((Date.now() - r.end_ts) / 60000)) + " min ago"
+          : "no GPS data";
+        const phone = formatDialableMobile(r.mobile);
+        return [
+          section + " " + r.patrol_no + " | " + r.device_id,
+          "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
+          "End: " + (r.end_time || "No data") + " (" + age + ")",
+          "KM: " + (r.km_run || "-"),
+          "Address: " + (r.end_address || "-"),
+          "Battery: " + (r.battery || "-"),
+          "Phone: " + (phone || "not mapped")
+        ].join("\n");
+      });
+
+      const header = section + " SECTION | " + lines.length + " ACTIVE DEVICES";
+      let chunk = header;
+      for (const line of lines) {
+        if ((chunk + "\n\n" + line).length > 3500) {
+          await send(env, chat, chunk);
+          chunk = section + " SECTION (continued)\n" + line;
+        } else {
+          chunk += "\n\n" + line;
+        }
+      }
+      if (chunk) await send(env, chat, chunk);
       return;
     }
 
