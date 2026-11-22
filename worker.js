@@ -1,4 +1,3 @@
-const STALE = 1800000;
 const REPEAT = 0;
 
 const SQL = [
@@ -172,6 +171,7 @@ async function cmd(env, db, msg) {
 /status ID
 /deviceinfo ID
 /monitor on|off
+/stale [MINUTES]
 /pending
 /health`);
       return;
@@ -327,6 +327,22 @@ Last feed: ${await setting(db, "last_ingest", "never")}`);
           : "Ignore list empty."
       );
 
+      return;
+    }
+
+    if (c === "stale") {
+      const current = Number(await setting(db, "stale_minutes", "30")) || 30;
+      if (!p.length) {
+        await send(env, chat, "Device update threshold: " + current + " minutes\nSet with /stale 15 (1-1440 minutes).");
+        return;
+      }
+      const minutes = Number(p[0]);
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+        await send(env, chat, "Use /stale MINUTES (1-1440).");
+        return;
+      }
+      await set(db, "stale_minutes", minutes);
+      await send(env, chat, "Device update threshold set to " + minutes + " minutes.");
       return;
     }
 
@@ -540,7 +556,7 @@ Phone: ${r.mobile ? MASK(r.mobile) : "not mapped"}`;
         WHERE d.active=1 AND i.device_id IS NULL
         AND (t.end_ts IS NULL OR t.end_ts<=?)
         ORDER BY t.end_ts LIMIT 50
-      `).bind(Date.now() - STALE).all();
+      `).bind(Date.now() - (Number(await setting(db, "stale_minutes", "30")) || 30) * 60000).all();
 
       await send(env, chat,
         r.results.length
@@ -959,6 +975,8 @@ async function tick(env) {
       !env.TELEGRAM_BOT_TOKEN) return;
 
   const now = Date.now();
+  const staleMinutes = Number(await setting(env.DB, "stale_minutes", "30")) || 30;
+  const staleMs = staleMinutes * 60000;
   const chat = env.TELEGRAM_ALERT_CHAT_ID || env.TELEGRAM_ADMIN_ID;
 
   if (!chat) return;
@@ -973,14 +991,14 @@ async function tick(env) {
   `).all();
 
   const staleDevices = snapshot.results.filter(x =>
-    !x.end_ts || Number(x.end_ts) < now - STALE
+    !x.end_ts || Number(x.end_ts) < now - staleMs
   );
 
   if (snapshot.results.length > 0 && staleDevices.length === 0) {
     await send(env, chat,
       "\u2705 ALL IS WELL\n" +
       "All " + snapshot.results.length +
-      " active devices updated within the last 30 minutes."
+      " active devices updated within the last " + staleMinutes + " minutes."
     );
   } else if (snapshot.results.length === 0) {
     await send(env, chat, "NO ACTIVE DEVICES CONFIGURED");
@@ -998,10 +1016,10 @@ async function tick(env) {
       "AND (t.last_alert_at IS NULL OR t.last_alert_at <= ?) " +
       "ORDER BY CASE d.section WHEN 'RJK' THEN 1 WHEN 'RG' THEN 2 " +
       "WHEN 'CH' THEN 3 ELSE 4 END,d.patrol_no LIMIT 70"
-    ).bind(now - STALE, now - REPEAT).all();
+    ).bind(now - staleMs, now - REPEAT).all();
 
     if (old.results.length) {
-      const staleLines = ["\u26a0\ufe0f GPS UPDATE OLDER THAN 30 MINUTES"];
+      const staleLines = ["\u26a0\ufe0f GPS UPDATE OLDER THAN " + staleMinutes + " MINUTES"];
       const staleEntities = [];
 
       for (const section of ["RJK", "RG", "CH"]) {
