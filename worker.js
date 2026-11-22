@@ -523,6 +523,7 @@ Last feed: ${await setting(db, "last_ingest", "never")}`);
         ? Math.max(0, Math.round((Date.now() - r.end_ts) / 60000)) + " min ago"
         : "no GPS data";
 
+      const phone = formatDialableMobile(r.mobile);
       let text =
         `${r.device_id} | ${r.section} ${r.patrol_no} | ${r.active ? "ACTIVE" : "INACTIVE"}
 GPS: ${r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"}
@@ -530,7 +531,7 @@ End: ${r.end_time || "No data"} (${age})
 KM: ${r.km_run || "-"}
 Address: ${r.end_address || "-"}
 Battery: ${r.battery || "-"}
-Phone: ${r.mobile ? MASK(r.mobile) : "not mapped"}`;
+Phone: ${phone || "not mapped"}`;
 
       if (c === "deviceinfo") {
         const ignored = await db.prepare(
@@ -543,7 +544,12 @@ Phone: ${r.mobile ? MASK(r.mobile) : "not mapped"}`;
           "\nIgnored: " + (ignored ? "YES" : "NO");
       }
 
-      await send(env, chat, text);
+      const phoneOffset = phone ? text.indexOf("Phone: ") + "Phone: ".length : -1;
+      await send(env, chat, text, phone ? [{
+        type: "phone_number",
+        offset: phoneOffset,
+        length: phone.length
+      }] : []);
       return;
     }
 
