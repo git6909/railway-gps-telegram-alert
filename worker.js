@@ -1051,6 +1051,11 @@ async function runRilappFeed(env) {
       ", IDs matched active devices=" + idMatched +
       ", valid End Times=" + timeParsed +
       ", headers=" + headers.join("|") +
+      ", tableHTMLchars=" + reportTable.length +
+      ", reportHTMLchars=" + reportHtml.length +
+      ", scriptRefs=" + Array.from(reportHtml.matchAll(/<script\b[^>]*src=["']([^"']+)["']/gi), m => m[1]).slice(0, 12).join(";") +
+      ", ajaxHints=" + Array.from(reportHtml.matchAll(/.{0,100}(?:ajax|serverSide|dataSrc|fetch\s*\(|XMLHttpRequest).{0,180}/gi), m => m[0].replace(/\s+/g, " ")).slice(0, 8).join(" || ").slice(0, 1000) +
+      ", knownIdsInHTML=" + Array.from(knownIds).filter(id => reportHtml.includes(id)).slice(0, 20).join(",") +
       ", sample=" + sampleDevices.join("; ").slice(0, 500)
     );
   }
