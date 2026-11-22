@@ -1047,12 +1047,12 @@ async function tick(env) {
             "Address: " + (x.end_address || "-"),
             "Battery: " + (x.battery || "-"),
             "GPS: " + (x.gps_on === 0 ? "OFF" : x.gps_on === 1 ? "ON" : "Unknown"),
-            "Mobile: " + (phone || "Not mapped")
+            "Call: " + (phone || "Not mapped")
           ];
 
           for (const line of details) {
-            if (phone && line === "Mobile: " + phone) {
-              const offset = staleLines.join("\n").length + 1 + "Mobile: ".length;
+            if (phone && line === "Call: " + phone) {
+              const offset = staleLines.join("\n").length + 1 + "Call: ".length;
               staleEntities.push({
                 type: "phone_number",
                 offset,
