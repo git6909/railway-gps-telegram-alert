@@ -116,6 +116,79 @@ async function send(env, chat, text, entities = []) {
   return !!d.ok;
 }
 
+async function sendKeyboard(env, chat, text, keyboard) {
+  if (!env.TELEGRAM_BOT_TOKEN || !chat) return false;
+  const r = await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/sendMessage", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chat, text, reply_markup: { inline_keyboard: keyboard }, disable_web_page_preview: true })
+  });
+  const d = await r.json();
+  if (!d.ok) console.error("Telegram keyboard error", JSON.stringify(d).slice(0, 300));
+  return !!d.ok;
+}
+async function answerCallback(env, callbackId, text = "") {
+  if (!env.TELEGRAM_BOT_TOKEN || !callbackId) return;
+  await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/answerCallbackQuery", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackId, text })
+  });
+}
+async function showSectionPicker(env, chat) {
+  await sendKeyboard(env, chat, "GPS Status - Select Section", [[
+    { text: "CH", callback_data: "gps:sec:CH" },
+    { text: "RG", callback_data: "gps:sec:RG" },
+    { text: "RJK", callback_data: "gps:sec:RJK" }
+  ]]);
+}
+async function showDevicePicker(env, db, chat, section) {
+  if (!SEC(section)) return;
+  const result = await db.prepare("SELECT device_id,patrol_no FROM devices WHERE active=1 AND section=? ORDER BY patrol_no,device_id").bind(section).all();
+  const rows = []; let row = [];
+  for (const d of result.results) {
+    row.push({ text: d.patrol_no + " (" + d.device_id + ")", callback_data: "gps:dev:" + section + ":" + d.device_id });
+    if (row.length === 2) { rows.push(row); row = []; }
+  }
+  if (row.length) rows.push(row);
+  rows.push([{ text: "Back to Sections", callback_data: "gps:sections" }]);
+  await sendKeyboard(env, chat, section + " - Select Patrol / Device (" + result.results.length + ")", rows);
+}
+async function showDeviceStatus(env, db, chat, section, id) {
+  const r = await db.prepare(`
+    SELECT d.*,m.mobile,m.person_name,t.end_time,t.end_ts,t.km_run,
+    t.end_address,t.battery,t.gps_on,t.received_at
+    FROM devices d LEFT JOIN mobile_map m ON m.device_id=d.device_id
+    LEFT JOIN telemetry t ON t.device_id=d.device_id
+    WHERE d.active=1 AND d.section=? AND d.device_id=?
+  `).bind(section, id).first();
+  if (!r) return send(env, chat, "Device not found in " + section + ".");
+  const age = r.end_ts ? Math.max(0, Math.round((Date.now() - r.end_ts) / 60000)) + " min ago" : "no GPS data";
+  const phone = formatDialableMobile(r.mobile);
+  const text = [
+    r.section + " " + r.patrol_no + " | " + r.device_id,
+    "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
+    "End: " + (r.end_time || "No data") + " (" + age + ")",
+    "KM: " + (r.km_run || "-"), "Address: " + (r.end_address || "-"),
+    "Battery: " + (r.battery || "-"), "Phone: " + (phone || "not mapped")
+  ].join("\n");
+  await sendKeyboard(env, chat, text, [
+    [{ text: "Back to " + section + " Devices", callback_data: "gps:sec:" + section }],
+    [{ text: "Back to Sections", callback_data: "gps:sections" }]
+  ]);
+}
+async function handleGpsCallback(env, db, query) {
+  const from = S(query.from?.id);
+  if (!env.TELEGRAM_ADMIN_ID || from !== S(env.TELEGRAM_ADMIN_ID)) {
+    await answerCallback(env, query.id, "Admin only"); return;
+  }
+  const data = S(query.data).split(":");
+  const chat = query.message?.chat?.id;
+  if (!chat || data[0] !== "gps") { await answerCallback(env, query.id); return; }
+  await answerCallback(env, query.id);
+  if (data[1] === "sections") return showSectionPicker(env, chat);
+  if (data[1] === "sec" && SEC(data[2])) return showDevicePicker(env, db, chat, data[2]);
+  if (data[1] === "dev" && SEC(data[2]) && ID(data[3])) return showDeviceStatus(env, db, chat, data[2], data[3]);
+}
+
 function formatDialableMobile(value) {
   const raw = String(value || "").trim();
   const digits = raw.replace(/\D/g, "");
@@ -575,6 +648,11 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           : "No mobile mapped."
       );
 
+      return;
+    }
+
+    if (c === "s" && !p.length) {
+      await showSectionPicker(env, chat);
       return;
     }
 
@@ -1462,7 +1540,7 @@ export default {
           body: JSON.stringify({
             url: webhookUrl,
             secret_token: env.TELEGRAM_WEBHOOK_SECRET,
-            allowed_updates: ["message", "edited_message"],
+            allowed_updates: ["message", "edited_message", "callback_query"],
             drop_pending_updates: false
           })
         });
@@ -1488,8 +1566,8 @@ export default {
       }
 
       const msg = update.message || update.edited_message;
-
       if (msg) ctx.waitUntil(cmd(env, env.DB, msg));
+      if (update.callback_query) ctx.waitUntil(handleGpsCallback(env, env.DB, update.callback_query));
 
       return J({ ok: true });
     }
