@@ -1008,15 +1008,30 @@ async function runRilappFeed(env) {
   if (!headerRow) throw new Error("RILAPP report table has no rows");
   const headers = headerRow.cells.map(x => String(x).toLowerCase().replace(/[^a-z0-9]/g, ""));
   const findColumn = patterns => headers.findIndex(x => patterns.some(pattern => pattern.test(x)));
-  const deviceIndex = findColumn([/^device$/]);
-  const startIndex = findColumn([/^ontime$/, /^starttime$/]);
-  const endIndex = findColumn([/^endtime$/]);
-  const addressIndex = findColumn([/^endaddress$/]);
-  const kmIndex = findColumn([/^kmrun$/, /^km$/]);
+  let deviceIndex = findColumn([/^device$/]);
+  let startIndex = findColumn([/^ontime$/, /^starttime$/]);
+  let endIndex = findColumn([/^endtime$/]);
+  let addressIndex = findColumn([/^endaddress$/]);
+  let kmIndex = findColumn([/^kmrun$/, /^km$/]);
+  const reportRows = allReportRows.slice(1);
+  const firstDataRow = reportRows.find(row => row.cells.length >= 7);
+  // RILAPP sometimes returns a grouped 18-column header but its actual body
+  // uses the legacy 10-column layout: Section, Device, Start Time,
+  // Start Address, End Time, End Address, KM Run, Overspeed, AvgSpeed,
+  // Start Low Batt. In that response the header-derived indexes are invalid.
+  if (firstDataRow && [deviceIndex, startIndex, endIndex, addressIndex, kmIndex]
+      .some(index => index < 0 || index >= firstDataRow.cells.length)) {
+    if (firstDataRow.cells.length >= 10) {
+      deviceIndex = 1;
+      startIndex = 2;
+      endIndex = 4;
+      addressIndex = 5;
+      kmIndex = 6;
+    }
+  }
   if ([deviceIndex, startIndex, endIndex, addressIndex, kmIndex].some(x => x < 0)) {
     throw new Error("RILAPP report columns not recognized: " + headerRow.cells.join(" | "));
   }
-  const reportRows = allReportRows.slice(1);
   const latest = new Map();
   let rowsSeen = 0, idMatched = 0, timeParsed = 0;
   const sampleDevices = [];
