@@ -170,7 +170,7 @@ async function cmd(env, db, msg) {
 /unmapmobile ID
 /status ID
 /deviceinfo ID
-/s RJK|RG|CH (section-wise live status)
+/s RJK|RG|CH [P#|ID] (section, patrol or ID status)
 /monitor on|off
 /stale [MINUTES]
 /pending
@@ -579,9 +579,37 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
     }
 
     if (c === "s") {
-      const section = S(id).toUpperCase();
-      if (!SEC(section)) {
-        await send(env, chat, "Use /s RJK or /s RG or /s CH");
+      const first = S(p[0]).toUpperCase();
+      const second = S(p[1]).toUpperCase();
+      let where = "d.active=1";
+      const args = [];
+      let label = "ALL SECTIONS";
+
+      if (SEC(first)) {
+        where += " AND d.section=?";
+        args.push(first);
+        label = first + " SECTION";
+
+        if (second) {
+          if (ID(second)) {
+            where += " AND d.device_id=?";
+            args.push(second);
+            label += " | ID " + second;
+          } else if (/^P\d{1,3}$/.test(second)) {
+            where += " AND UPPER(d.patrol_no)=?";
+            args.push(second);
+            label += " | " + second;
+          } else {
+            await send(env, chat, "Use /s CH, /s CH P1, or /s CH 88338");
+            return;
+          }
+        }
+      } else if (ID(first) && !second) {
+        where += " AND d.device_id=?";
+        args.push(first);
+        label = "DEVICE ID " + first;
+      } else {
+        await send(env, chat, "Use /s RJK|RG|CH, /s CH P1, /s CH 88338, or /s 88338");
         return;
       }
 
@@ -592,12 +620,12 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
         LEFT JOIN telemetry t ON t.device_id=d.device_id
-        WHERE d.active=1 AND d.section=?
-        ORDER BY d.patrol_no,d.device_id
-      `).bind(section).all();
+        WHERE ` + where + `
+        ORDER BY d.section,d.patrol_no,d.device_id
+      `).bind(...args).all();
 
       if (!result.results.length) {
-        await send(env, chat, "No active devices found in " + section + " SECTION.");
+        await send(env, chat, "No matching active device found: " + label);
         return;
       }
 
@@ -607,7 +635,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           : "no GPS data";
         const phone = formatDialableMobile(r.mobile);
         return [
-          section + " " + r.patrol_no + " | " + r.device_id,
+          r.section + " " + r.patrol_no + " | " + r.device_id,
           "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
           "End: " + (r.end_time || "No data") + " (" + age + ")",
           "KM: " + (r.km_run || "-"),
@@ -617,12 +645,11 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
         ].join("\n");
       });
 
-      const header = section + " SECTION | " + lines.length + " ACTIVE DEVICES";
-      let chunk = header;
+      let chunk = label + " | " + lines.length + " DEVICE(S)";
       for (const line of lines) {
         if ((chunk + "\n\n" + line).length > 3500) {
           await send(env, chat, chunk);
-          chunk = section + " SECTION (continued)\n" + line;
+          chunk = label + " (continued)\n" + line;
         } else {
           chunk += "\n\n" + line;
         }
