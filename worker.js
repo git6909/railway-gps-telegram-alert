@@ -860,13 +860,22 @@ function rilExtractGpsId(deviceText, rawRow) {
   return rilGetDeviceIdFromLinks(rawRow);
 }
 
-function rilParseDateTime(value) {
-  const match = String(value || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (!match) return null;
-  const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);
-  const hour = Number(match[4]), minute = Number(match[5]), second = Number(match[6] || 0);
-  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
-  return Date.UTC(year, month - 1, day, hour, minute, second) - 330 * 60 * 1000;
+function rilParseDateTime(value, period) {
+  const text = String(value || "").trim();
+  const match = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (match) {
+    const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);
+    const hour = Number(match[4]), minute = Number(match[5]), second = Number(match[6] || 0);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
+    return Date.UTC(year, month - 1, day, hour, minute, second) - 330 * 60 * 1000;
+  }
+  const clock = text.match(/(?:^|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!clock || !period) return null;
+  const hour = Number(clock[1]), minute = Number(clock[2]), second = Number(clock[3] || 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  const date = hour < 7 || (hour === 7 && minute < 30) ? period.endDate : period.startDate;
+  const parts = date.split("/").map(Number);
+  return Date.UTC(parts[2], parts[1] - 1, parts[0], hour, minute, second) - 330 * 60 * 1000;
 }
 
 function rilParseBattery(value) {
@@ -968,24 +977,37 @@ async function runRilappFeed(env) {
   }
   const reportTable = rilGetTable(reportHtml, "example");
   if (!reportTable) throw new Error("RILAPP report table #example not found");
-  const reportRows = rilRowsFromTable(reportTable).slice(1);
+  const allReportRows = rilRowsFromTable(reportTable);
+  const headerRow = allReportRows[0];
+  if (!headerRow) throw new Error("RILAPP report table has no rows");
+  const headers = headerRow.cells.map(x => String(x).toLowerCase().replace(/[^a-z0-9]/g, ""));
+  const findColumn = patterns => headers.findIndex(x => patterns.some(pattern => pattern.test(x)));
+  const deviceIndex = findColumn([/^device$/]);
+  const startIndex = findColumn([/^ontime$/, /^starttime$/]);
+  const endIndex = findColumn([/^endtime$/]);
+  const addressIndex = findColumn([/^endaddress$/]);
+  const kmIndex = findColumn([/^kmrun$/, /^km$/]);
+  if ([deviceIndex, startIndex, endIndex, addressIndex, kmIndex].some(x => x < 0)) {
+    throw new Error("RILAPP report columns not recognized: " + headerRow.cells.join(" | "));
+  }
+  const reportRows = allReportRows.slice(1);
   const latest = new Map();
   for (const row of reportRows) {
     const c = row.cells;
-    if (c.length <= 6) continue;
-    const gpsId = rilExtractGpsId(c[1], row.raw);
+    if (c.length <= Math.max(deviceIndex, startIndex, endIndex, addressIndex, kmIndex)) continue;
+    const gpsId = rilExtractGpsId(c[deviceIndex], row.raw);
     if (!knownIds.has(gpsId)) continue;
-    const endTs = rilParseDateTime(c[4]);
+    const endTs = rilParseDateTime(c[endIndex], period);
     if (!endTs) continue;
     const old = latest.get(gpsId);
     if (!old || endTs > old.end_ts) {
       latest.set(gpsId, {
         device_id: gpsId,
-        start_time: c[2] || null,
-        end_time: c[4] || null,
+        start_time: c[startIndex] || null,
+        end_time: c[endIndex] || null,
         end_ts: endTs,
-        end_address: c[5] || null,
-        km_run: c[6] || null
+        end_address: c[addressIndex] || null,
+        km_run: c[kmIndex] || null
       });
     }
   }
