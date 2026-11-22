@@ -1019,13 +1019,20 @@ async function runRilappFeed(env) {
   }
   const reportRows = allReportRows.slice(1);
   const latest = new Map();
+  let rowsSeen = 0, idMatched = 0, timeParsed = 0;
+  const sampleDevices = [];
   for (const row of reportRows) {
     const c = row.cells;
     if (c.length <= Math.max(deviceIndex, startIndex, endIndex, addressIndex, kmIndex)) continue;
-    const gpsId = rilExtractGpsId(c[deviceIndex], row.raw);
+    rowsSeen++;
+    const deviceText = c[deviceIndex] || "";
+    const gpsId = rilExtractGpsId(deviceText, row.raw);
+    if (sampleDevices.length < 12) sampleDevices.push(deviceText + " => " + (gpsId || "NO_ID"));
     if (!knownIds.has(gpsId)) continue;
+    idMatched++;
     const endTs = rilParseDateTime(c[endIndex], period);
     if (!endTs) continue;
+    timeParsed++;
     const old = latest.get(gpsId);
     if (!old || endTs > old.end_ts) {
       latest.set(gpsId, {
@@ -1039,7 +1046,13 @@ async function runRilappFeed(env) {
     }
   }
   if (!latest.size) {
-    throw new Error("No report rows matched configured GPS IDs in #example; ingestion stopped safely");
+    throw new Error(
+      "RILAPP parser diagnostic: rows=" + rowsSeen +
+      ", IDs matched active devices=" + idMatched +
+      ", valid End Times=" + timeParsed +
+      ", headers=" + headers.join("|") +
+      ", sample=" + sampleDevices.join("; ").slice(0, 500)
+    );
   }
 
   const batteryResponse = await rilRequest(batteryUrl, {}, jar);
