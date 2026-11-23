@@ -145,7 +145,7 @@ async function showDevicePicker(env, db, chat, section) {
   const result = await db.prepare("SELECT device_id,patrol_no FROM devices WHERE active=1 AND section=? ORDER BY patrol_no,device_id").bind(section).all();
   const rows = []; let row = [];
   for (const d of result.results) {
-    row.push({ text: d.patrol_no + " (" + d.device_id + ")", callback_data: "gps:dev:" + section + ":" + d.device_id });
+    row.push({ text: String(d.patrol_no || "").replace(/^P/i, "") + " (" + d.device_id + ")", callback_data: "gps:dev:" + section + ":" + d.device_id });
     if (row.length === 2) { rows.push(row); row = []; }
   }
   if (row.length) rows.push(row);
@@ -653,6 +653,28 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
 
     if (c === "s" && !p.length) {
       await showSectionPicker(env, chat);
+      return;
+    }
+
+    if (["rg", "ch", "rjk"].includes(c)) {
+      const section = c.toUpperCase();
+      if (!p.length) {
+        await showDevicePicker(env, db, chat, section);
+        return;
+      }
+      const patrolArg = S(p[0]).toUpperCase().replace(/^P/, "");
+      if (!/^\d{1,3}$/.test(patrolArg)) {
+        await send(env, chat, "Use /" + c + " or /" + c + " 1 (patrol number without P).");
+        return;
+      }
+      const result = await db.prepare(
+        "SELECT device_id FROM devices WHERE active=1 AND section=? AND CAST(REPLACE(UPPER(patrol_no),'P','') AS INTEGER)=? ORDER BY device_id LIMIT 1"
+      ).bind(section, Number(patrolArg)).first();
+      if (!result) {
+        await send(env, chat, "No active device found: " + section + " " + patrolArg);
+        return;
+      }
+      await showDeviceStatus(env, db, chat, section, result.device_id);
       return;
     }
 
