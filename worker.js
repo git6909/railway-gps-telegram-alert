@@ -12,6 +12,7 @@ const SQL = [
   `CREATE TABLE IF NOT EXISTS mobile_map (
     device_id TEXT PRIMARY KEY,
     mobile TEXT NOT NULL,
+    mobile2 TEXT DEFAULT '',
     person_name TEXT DEFAULT '',
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -54,11 +55,24 @@ const ID = v => /^\d{4,12}$/.test(S(v));
 const SEC = v => ["RJK", "RG", "CH"].includes(S(v).toUpperCase());
 const MASK = v => "******" + S(v).slice(-4);
 
+function phoneEntities(text) {
+  const entities = [];
+  for (const match of String(text).matchAll(/\+91\d{10}/g)) {
+    entities.push({ type: "phone_number", offset: match.index, length: match[0].length });
+  }
+  return entities;
+}
+
 async function init(db) {
   for (const q of SQL) {
     await db.prepare(q).run();
   }
 
+  try {
+    await db.prepare("ALTER TABLE mobile_map ADD COLUMN mobile2 TEXT DEFAULT ''").run();
+  } catch (e) {
+    if (!String(e).toLowerCase().includes("duplicate column")) throw e;
+  }
   await db.prepare(
     "INSERT OR IGNORE INTO settings(key,value) VALUES('monitor','off')"
   ).run();
@@ -90,6 +104,7 @@ async function seedTelemetry(db, id) {
 
 async function send(env, chat, text, entities = []) {
   if (!env.TELEGRAM_BOT_TOKEN || !chat) return false;
+  if (!entities.length) entities = phoneEntities(text);
 
   const r = await fetch(
     "https://api.telegram.org/bot" +
@@ -116,11 +131,12 @@ async function send(env, chat, text, entities = []) {
   return !!d.ok;
 }
 
-async function sendKeyboard(env, chat, text, keyboard) {
+async function sendKeyboard(env, chat, text, keyboard, entities = []) {
   if (!env.TELEGRAM_BOT_TOKEN || !chat) return false;
+  if (!entities.length) entities = phoneEntities(text);
   const r = await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/sendMessage", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chat, text, reply_markup: { inline_keyboard: keyboard }, disable_web_page_preview: true })
+    body: JSON.stringify({ chat_id: chat, text, ...(entities.length ? { entities } : {}), reply_markup: { inline_keyboard: keyboard }, disable_web_page_preview: true })
   });
   const d = await r.json();
   if (!d.ok) console.error("Telegram keyboard error", JSON.stringify(d).slice(0, 300));
@@ -154,7 +170,7 @@ async function showDevicePicker(env, db, chat, section) {
 }
 async function showDeviceStatus(env, db, chat, section, id) {
   const r = await db.prepare(`
-    SELECT d.*,m.mobile,m.person_name,t.end_time,t.end_ts,t.km_run,
+    SELECT d.*,m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
     t.end_address,t.battery,t.gps_on,t.received_at
     FROM devices d LEFT JOIN mobile_map m ON m.device_id=d.device_id
     LEFT JOIN telemetry t ON t.device_id=d.device_id
@@ -163,17 +179,23 @@ async function showDeviceStatus(env, db, chat, section, id) {
   if (!r) return send(env, chat, "Device not found in " + section + ".");
   const age = r.end_ts ? Math.max(0, Math.round((Date.now() - r.end_ts) / 60000)) + " min ago" : "no GPS data";
   const phone = formatDialableMobile(r.mobile);
+  const phone2 = formatDialableMobile(r.mobile2);
   const text = [
     r.section + " " + r.patrol_no + " | " + r.device_id,
     "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
     "End: " + (r.end_time || "No data") + " (" + age + ")",
     "KM: " + (r.km_run || "-"), "Address: " + (r.end_address || "-"),
-    "Battery: " + (r.battery || "-"), "Phone: " + (phone || "not mapped")
+    "Battery: " + (r.battery || "-"),
+    "Phone 1: " + (phone || "not mapped"),
+    "Phone 2: " + (phone2 || "not mapped")
   ].join("\n");
+  const entities = [];
+  if (phone) entities.push({ type: "phone_number", offset: text.indexOf("Phone 1: ") + "Phone 1: ".length, length: phone.length });
+  if (phone2) entities.push({ type: "phone_number", offset: text.indexOf("Phone 2: ") + "Phone 2: ".length, length: phone2.length });
   await sendKeyboard(env, chat, text, [
     [{ text: "Back to " + section + " Devices", callback_data: "gps:sec:" + section }],
     [{ text: "Back to Sections", callback_data: "gps:sections" }]
-  ]);
+  ], entities);
 }
 async function handleGpsCallback(env, db, query) {
   const from = S(query.from?.id);
@@ -238,7 +260,7 @@ async function cmd(env, db, msg) {
 /unignore ID
 /ignored
 /importdevices
-/mapmobile
+/mapmobile JSON (DEVICE_ID: [PHONE1, PHONE2])
 /mobile ID
 /unmapmobile ID
 /status ID
@@ -532,9 +554,11 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
         const arr = Array.isArray(data)
           ? data
           : Object.entries(data || {}).map(([device_id, v]) =>
-              typeof v === "string"
-                ? { device_id, mobile: v }
-                : { device_id, ...v }
+              Array.isArray(v)
+                ? { device_id, mobile: v[0], mobile2: v[1] }
+                : typeof v === "string"
+                  ? { device_id, mobile: v }
+                  : { device_id, ...v }
             );
 
         if (!arr.length) {
@@ -546,34 +570,33 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
 
         for (const x of arr) {
           const d = S(x.device_id || x.id);
-          const phone = S(x.mobile || x.phone).replace(/[\s+-]/g, "");
+          const phone = S(x.mobile || x.phone || x.mobile1).replace(/[\s+-]/g, "");
+          const phone2 = S(x.mobile2 || x.phone2).replace(/[\s+-]/g, "");
 
-          if (!ID(d) || !/^\d{10,15}$/.test(phone)) {
+          if (!ID(d) || !/^\d{10,15}$/.test(phone) ||
+              (phone2 && !/^\d{10,15}$/.test(phone2))) {
             await send(env, chat, "Invalid mobile mapping JSON.");
             return;
           }
 
-          rows.push({
-            d,
-            phone,
-            name: S(x.name || x.person_name)
-          });
+          rows.push({ d, phone, phone2, name: S(x.name || x.person_name) });
         }
 
         await db.batch(rows.map(x =>
           db.prepare(`
-            INSERT INTO mobile_map(device_id,mobile,person_name,updated_at)
-            VALUES(?,?,?,CURRENT_TIMESTAMP)
+            INSERT INTO mobile_map(device_id,mobile,mobile2,person_name,updated_at)
+            VALUES(?,?,?,?,CURRENT_TIMESTAMP)
             ON CONFLICT(device_id) DO UPDATE SET
             mobile=excluded.mobile,
+            mobile2=excluded.mobile2,
             person_name=excluded.person_name,
             updated_at=CURRENT_TIMESTAMP
-          `).bind(x.d, x.phone, x.name)
+          `).bind(x.d, x.phone, x.phone2, x.name)
         ));
 
         await send(env, chat,
           "Mobile mappings saved: " + rows.length + "\n" +
-          rows.map(x => x.d + " -> " + MASK(x.phone)).join("\n")
+          rows.map(x => x.d + " -> " + MASK(x.phone) + (x.phone2 ? " / " + MASK(x.phone2) : "")).join("\n")
         );
 
         return;
@@ -638,12 +661,12 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       }
 
       const r = await db.prepare(
-        "SELECT mobile,person_name FROM mobile_map WHERE device_id=?"
+        "SELECT mobile,mobile2,person_name FROM mobile_map WHERE device_id=?"
       ).bind(id).first();
 
       await send(env, chat,
         r
-          ? id + " -> " + MASK(r.mobile) +
+          ? id + " -> " + MASK(r.mobile) + (r.mobile2 ? " / " + MASK(r.mobile2) : "") +
             (r.person_name ? " (" + r.person_name + ")" : "")
           : "No mobile mapped."
       );
@@ -715,7 +738,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
 
       const result = await db.prepare(`
         SELECT d.device_id,d.section,d.patrol_no,d.active,
-        m.mobile,m.person_name,t.end_time,t.end_ts,t.km_run,
+        m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
         t.end_address,t.battery,t.gps_on,t.received_at
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
@@ -734,6 +757,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           ? Math.max(0, Math.round((Date.now() - r.end_ts) / 60000)) + " min ago"
           : "no GPS data";
         const phone = formatDialableMobile(r.mobile);
+        const phone2 = formatDialableMobile(r.mobile2);
         return [
           r.section + " " + r.patrol_no + " | " + r.device_id,
           "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
@@ -741,7 +765,8 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           "KM: " + (r.km_run || "-"),
           "Address: " + (r.end_address || "-"),
           "Battery: " + (r.battery || "-"),
-          "Phone: " + (phone || "not mapped")
+          "Phone 1: " + (phone || "not mapped"),
+          "Phone 2: " + (phone2 || "not mapped")
         ].join("\n");
       });
 
@@ -765,7 +790,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       }
 
       const r = await db.prepare(`
-        SELECT d.*,m.mobile,m.person_name,
+        SELECT d.*,m.mobile,m.mobile2,m.person_name,
         t.end_time,t.end_ts,t.km_run,t.end_address,
         t.battery,t.gps_on,t.received_at
         FROM devices d
@@ -784,6 +809,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
         : "no GPS data";
 
       const phone = formatDialableMobile(r.mobile);
+      const phone2 = formatDialableMobile(r.mobile2);
       let text =
         `${r.device_id} | ${r.section} ${r.patrol_no} | ${r.active ? "ACTIVE" : "INACTIVE"}
 GPS: ${r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"}
@@ -791,7 +817,7 @@ End: ${r.end_time || "No data"} (${age})
 KM: ${r.km_run || "-"}
 Address: ${r.end_address || "-"}
 Battery: ${r.battery || "-"}
-Phone: ${phone || "not mapped"}`;
+Phone 1: ${phone || "not mapped"}\nPhone 2: ${phone2 || "not mapped"}`;
 
       if (c === "deviceinfo") {
         const ignored = await db.prepare(
@@ -804,12 +830,18 @@ Phone: ${phone || "not mapped"}`;
           "\nIgnored: " + (ignored ? "YES" : "NO");
       }
 
-      const phoneOffset = phone ? text.indexOf("Phone: ") + "Phone: ".length : -1;
-      await send(env, chat, text, phone ? [{
+      const phoneEntities = [];
+      if (phone) phoneEntities.push({
         type: "phone_number",
-        offset: phoneOffset,
+        offset: text.indexOf("Phone 1: ") + "Phone 1: ".length,
         length: phone.length
-      }] : []);
+      });
+      if (phone2) phoneEntities.push({
+        type: "phone_number",
+        offset: text.indexOf("Phone 2: ") + "Phone 2: ".length,
+        length: phone2.length
+      });
+      await send(env, chat, text, phoneEntities);
       return;
     }
 
@@ -1329,7 +1361,7 @@ async function tick(env) {
     const old = await env.DB.prepare(
       "SELECT d.device_id,d.section,d.patrol_no," +
       "t.start_time,t.end_time,t.end_ts,t.km_run,t.end_address," +
-      "t.battery,t.gps_on,t.last_alert_at,m.mobile,m.person_name " +
+      "t.battery,t.gps_on,t.last_alert_at,m.mobile,m.mobile2,m.person_name " +
       "FROM devices d " +
       "LEFT JOIN telemetry t ON t.device_id=d.device_id " +
       "LEFT JOIN ignored_devices i ON i.device_id=d.device_id " +
@@ -1352,6 +1384,7 @@ async function tick(env) {
 
         for (const x of items) {
           const phone = formatDialableMobile(x.mobile);
+          const phone2 = formatDialableMobile(x.mobile2);
           const age = x.end_ts
             ? Math.floor((now - Number(x.end_ts)) / 60000) + " minutes"
             : "No GPS data";
@@ -1364,16 +1397,19 @@ async function tick(env) {
             "Address: " + (x.end_address || "-"),
             "Battery: " + (x.battery || "-"),
             "GPS: " + (x.gps_on === 0 ? "OFF" : x.gps_on === 1 ? "ON" : "Unknown"),
-            "Call: " + (phone || "Not mapped")
+            "Call 1: " + (phone || "Not mapped"),
+            "Call 2: " + (phone2 || "Not mapped")
           ];
 
           for (const line of details) {
-            if (phone && line === "Call: " + phone) {
-              const offset = staleLines.join("\n").length + 1 + "Call: ".length;
+            const prefix = line.startsWith("Call 1: ") ? "Call 1: " :
+              line.startsWith("Call 2: ") ? "Call 2: " : "";
+            const value = prefix ? line.slice(prefix.length) : "";
+            if (prefix && value.startsWith("+")) {
               staleEntities.push({
                 type: "phone_number",
-                offset,
-                length: phone.length
+                offset: staleLines.join("\n").length + 1 + prefix.length,
+                length: value.length
               });
             }
             staleLines.push(line);
@@ -1418,7 +1454,7 @@ async function tick(env) {
   {
     const off = await env.DB.prepare(`
       SELECT t.device_id,d.section,d.patrol_no,
-      t.last_night_alert_at,m.mobile
+      t.last_night_alert_at,m.mobile,m.mobile2
       FROM telemetry t
       JOIN devices d ON d.device_id=t.device_id
       LEFT JOIN ignored_devices i ON i.device_id=t.device_id
@@ -1434,10 +1470,22 @@ async function tick(env) {
       const offEntities = [];
       for (const x of off.results) {
         const phone = formatDialableMobile(x.mobile);
-        const line = x.section + " " + x.patrol_no + " | " + x.device_id + " | Phone: " + (phone || "not mapped");
-        const offset = offLines.join("\n").length + 1 + line.lastIndexOf(phone);
+        const phone2 = formatDialableMobile(x.mobile2);
+        const line = x.section + " " + x.patrol_no + " | " + x.device_id +
+          " | Phone 1: " + (phone || "not mapped") +
+          " | Phone 2: " + (phone2 || "not mapped");
+        const base = offLines.join("\n").length + 1;
         offLines.push(line);
-        if (phone) offEntities.push({ type: "phone_number", offset, length: phone.length });
+        if (phone) offEntities.push({
+          type: "phone_number",
+          offset: base + line.indexOf("Phone 1: ") + "Phone 1: ".length,
+          length: phone.length
+        });
+        if (phone2) offEntities.push({
+          type: "phone_number",
+          offset: base + line.indexOf("Phone 2: ") + "Phone 2: ".length,
+          length: phone2.length
+        });
       }
       const ok = await send(env, chat, offLines.join("\n"), offEntities);
 
