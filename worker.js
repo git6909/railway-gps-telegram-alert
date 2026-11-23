@@ -29,6 +29,8 @@ const SQL = [
     battery TEXT,
     start_time TEXT,
     gps_on INTEGER,
+    direction TEXT,
+    direction_updated_at TEXT,
     payload TEXT,
     received_at TEXT DEFAULT CURRENT_TIMESTAMP,
     last_alert_at INTEGER,
@@ -55,6 +57,66 @@ const ID = v => /^\d{4,12}$/.test(S(v));
 const SEC = v => ["RJK", "RG", "CH"].includes(S(v).toUpperCase());
 const MASK = v => "******" + S(v).slice(-4);
 
+// GPS-ID keyed patrol beat boundaries copied from Patrolling Dashboard v2.1.0.
+const BEAT_BY_GPS_ID = Object.freeze({
+  "88338": ["5/0", "9/0"],
+  "88303": ["9/0", "13/0"],
+  "88294": ["13/0", "17/0"],
+  "88280": ["17/0", "21/0"],
+  "88242": ["21/0", "27/0"],
+  "88235": ["27/0", "33/0"],
+  "88246": ["33/0", "37/0"],
+  "88266": ["37/0", "41/0"],
+  "88221": ["41/0", "45/0"],
+  "87986": ["45/0", "49/0"],
+  "88176": ["49/0", "53/0"],
+  "88274": ["53/0", "57/0"],
+  "88096": ["57/0", "61/0"],
+  "88216": ["61/0", "65/0"],
+  "88088": ["65/0", "69/0"],
+  "88262": ["69/785", "74/0"],
+  "88295": ["74/0", "78/0"],
+  "88317": ["78/0", "82/0"],
+  "88319": ["82/0", "86/0"],
+  "88254": ["86/0", "90/0"],
+  "88802": ["90/0", "94/0"],
+  "88209": ["94/0", "98/0"],
+  "88349": ["98/0", "102/0"],
+  "83597": ["102/0", "106/0"],
+  "88336": ["106/0", "110/0"],
+  "87657": ["110/0", "114/0"],
+  "88638": ["114/0", "118/0"],
+  "88059": ["118/0", "122/0"],
+  "88208": ["122/0", "126/0"],
+  "88347": ["126/0", "130/0"],
+  "88147": ["130/0", "134/0"],
+  "88279": ["134/0", "138/0"],
+  "88244": ["138/0", "142/0"],
+  "88495": ["142/0", "146/0"],
+  "88243": ["146/0", "150/0"],
+  "88171": ["150/0", "153/0"],
+  "88067": ["1/10", "5/10"],
+  "88268": ["5/10", "9/10"],
+  "87989": ["9/10", "13/10"],
+  "88308": ["13/10", "17/10"],
+  "88213": ["17/10", "21/10"],
+  "88045": ["21/10", "25/10"],
+  "88044": ["25/10", "29/10"],
+  "88223": ["29/10", "33/10"],
+  "87980": ["33/10", "37/10"],
+  "88214": ["37/10", "41/10"],
+  "88203": ["41/10", "43/5"]
+});
+function formatBeat(deviceId) {
+  const beat = BEAT_BY_GPS_ID[S(deviceId)];
+  return beat ? beat[0] + " – " + beat[1] : "Not mapped";
+}
+function formatDirection(direction) {
+  if (direction === "up") return "⟹ UP (railway KM increasing)";
+  if (direction === "down") return "⟸ DOWN (railway KM decreasing)";
+  return "Unknown (insufficient/unclear GPS points)";
+}
+
 function phoneEntities(text) {
   const entities = [];
   for (const match of String(text).matchAll(/\+91\d{10}/g)) {
@@ -72,6 +134,13 @@ async function init(db) {
     await db.prepare("ALTER TABLE mobile_map ADD COLUMN mobile2 TEXT DEFAULT ''").run();
   } catch (e) {
     if (!String(e).toLowerCase().includes("duplicate column")) throw e;
+  }
+  for (const [column, definition] of [["direction", "TEXT"], ["direction_updated_at", "TEXT"]]) {
+    try {
+      await db.prepare("ALTER TABLE telemetry ADD COLUMN " + column + " " + definition).run();
+    } catch (e) {
+      if (!String(e).toLowerCase().includes("duplicate column")) throw e;
+    }
   }
   await db.prepare(
     "INSERT OR IGNORE INTO settings(key,value) VALUES('monitor','off')"
@@ -171,7 +240,7 @@ async function showDevicePicker(env, db, chat, section) {
 async function showDeviceStatus(env, db, chat, section, id) {
   const r = await db.prepare(`
     SELECT d.*,m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
-    t.end_address,t.battery,t.gps_on,t.received_at
+    t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at
     FROM devices d LEFT JOIN mobile_map m ON m.device_id=d.device_id
     LEFT JOIN telemetry t ON t.device_id=d.device_id
     WHERE d.active=1 AND d.section=? AND d.device_id=?
@@ -186,6 +255,9 @@ async function showDeviceStatus(env, db, chat, section, id) {
     "End: " + (r.end_time || "No data") + " (" + age + ")",
     "KM: " + (r.km_run || "-"), "Address: " + (r.end_address || "-"),
     "Battery: " + (r.battery || "-"),
+    "Beat: " + formatBeat(r.device_id),
+    "Direction: " + formatDirection(r.direction),
+    "Direction checked: " + (r.direction_updated_at || "never"),
     "Phone 1: " + (phone || "not mapped"),
     "Phone 2: " + (phone2 || "not mapped")
   ].join("\n");
@@ -283,6 +355,11 @@ async function cmd(env, db, msg) {
           await send(env, chat,
             "RILAPP SYNC SUCCESS\nRows updated: " + result.rows +
             "\nBattery matches: " + result.batteries +
+            "\nGPS History checked: " + (result.directions?.checked || 0) +
+            " | UP: " + (result.directions?.up || 0) +
+            " | DOWN: " + (result.directions?.down || 0) +
+            " | Unknown: " + (result.directions?.unknown || 0) +
+            " | Failed: " + (result.directions?.failed || 0) +
             "\nWindow: " + result.window
           );
         } else {
@@ -739,7 +816,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       const result = await db.prepare(`
         SELECT d.device_id,d.section,d.patrol_no,d.active,
         m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
-        t.end_address,t.battery,t.gps_on,t.received_at
+        t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
         LEFT JOIN telemetry t ON t.device_id=d.device_id
@@ -765,6 +842,8 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           "KM: " + (r.km_run || "-"),
           "Address: " + (r.end_address || "-"),
           "Battery: " + (r.battery || "-"),
+          "Beat: " + formatBeat(r.device_id),
+          "Direction: " + formatDirection(r.direction),
           "Phone 1: " + (phone || "not mapped"),
           "Phone 2: " + (phone2 || "not mapped")
         ].join("\n");
@@ -792,7 +871,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       const r = await db.prepare(`
         SELECT d.*,m.mobile,m.mobile2,m.person_name,
         t.end_time,t.end_ts,t.km_run,t.end_address,
-        t.battery,t.gps_on,t.received_at
+        t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
         LEFT JOIN telemetry t ON t.device_id=d.device_id
@@ -817,6 +896,9 @@ End: ${r.end_time || "No data"} (${age})
 KM: ${r.km_run || "-"}
 Address: ${r.end_address || "-"}
 Battery: ${r.battery || "-"}
+Beat: ${formatBeat(r.device_id)}
+Direction: ${formatDirection(r.direction)}
+Direction checked: ${r.direction_updated_at || "never"}
 Phone 1: ${phone || "not mapped"}\nPhone 2: ${phone2 || "not mapped"}`;
 
       if (c === "deviceinfo") {
@@ -1093,6 +1175,21 @@ function rilGetDeviceIdFromLinks(rawHtml) {
   return "";
 }
 
+// Reuse the authenticated report row's original live-map URL.
+function rilGetDeviceMapUrlFromRow(rawHtml) {
+  let fallback = "";
+  for (const match of String(rawHtml).matchAll(/<a\b[^>]*href\s*=\s*(?:"([^"]*deviceid=[^"]*)"|'([^']*deviceid=[^']*)')[^>]*>/gi)) {
+    try {
+      const href = rilHtmlText(match[1] ?? match[2]).replace(/&amp;/gi, "&");
+      const url = new URL(href, "https://ip3.rilapp.com/railways/");
+      if (url.origin !== "https://ip3.rilapp.com" || !url.searchParams.get("deviceid")) continue;
+      if (/liveMapGoogle\.php/i.test(url.pathname)) return url.toString();
+      if (!fallback) fallback = url.toString();
+    } catch (_) {}
+  }
+  return fallback;
+}
+
 function rilExtractGpsId(deviceText, rawRow) {
   const match = String(deviceText || "").match(/(?:#|\()\s*(\d{4,})\b/);
   if (match) return match[1];
@@ -1167,6 +1264,111 @@ function rilParseBatteryPage(html) {
     }
   }
   return map;
+}
+
+
+const RIL_DIRECTION_LC_KM = new Map([
+  [37, 71.45], [38, 73.05], [39, 74.75], [40, 77.15], [41, 79.15],
+  [48, 91.25], [49, 93.35], [50, 95.75], [51, 97.85],
+  [53, 105.3], [56, 109.5], [560, 110.2], [60, 115.4],
+  [66, 129.4], [73, 141.35], [77, 149.45]
+]);
+
+function rilKmFromDirectionAddress(address) {
+  const value = String(address || "").replace(/\s+/g, " ").trim();
+  if (!value) return null;
+  if (/LC[-\s]*56\s*\/\s*A/i.test(value)) return RIL_DIRECTION_LC_KM.get(560);
+  const chainage = value.match(/(\d+)\s*\/\s*(\d+)/);
+  if (chainage) {
+    const km = Number(chainage[1]);
+    const partText = chainage[2];
+    const part = Number(partText);
+    if (!Number.isFinite(km) || !Number.isFinite(part)) return null;
+    return km + (partText.length === 1 ? part * 0.1 : part / 1000);
+  }
+  const lc = value.match(/LC[-\s.]*NO\.?\s*(\d+)|LC[-\s]*(\d+)/i);
+  const lcNumber = lc ? Number(lc[1] || lc[2]) : null;
+  return lcNumber !== null && Number.isFinite(lcNumber)
+    ? (RIL_DIRECTION_LC_KM.get(lcNumber) ?? null) : null;
+}
+
+function rilNormalizeTrackTimestamp(value) {
+  if (value == null || value === "") return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric > 1e12 ? numeric : numeric * 1000;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function rilExtractHistoryPositions(html) {
+  const match = String(html || "").match(/(?:var|let|const)\s+(?:poisitionsdata|positionsdata)\s*=\s*(\[[\s\S]*?\])\s*;/i);
+  if (!match) return [];
+  try {
+    const parsed = JSON.parse(match[1]);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function rilCalculateLatestDirection(html) {
+  const positions = rilExtractHistoryPositions(html);
+  const trend = [];
+  for (const point of positions) {
+    const km = rilKmFromDirectionAddress(point && point.address);
+    const timestamp = rilNormalizeTrackTimestamp(point && point.timestamp);
+    if (km !== null && timestamp !== null) trend.push({ km, timestamp });
+  }
+  trend.sort((a, b) => a.timestamp - b.timestamp);
+  if (trend.length < 2) return null;
+  // Match the supplied dashboard: ignore movement of 50 metres or less.
+  for (let i = trend.length - 1; i > 0; i--) {
+    const difference = trend[i].km - trend[i - 1].km;
+    if (difference > 0.05) return "up";
+    if (difference < -0.05) return "down";
+  }
+  return null;
+}
+
+async function rilRefreshDirections(db, latest, jar) {
+  const current = await db.prepare("SELECT device_id,direction_updated_at FROM telemetry").all();
+  const lastChecked = new Map(current.results.map(x => [
+    String(x.device_id), Date.parse(String(x.direction_updated_at || "")) || 0
+  ]));
+  const now = Date.now();
+  const tasks = Array.from(latest.values()).filter(item =>
+    item.map_url && now - (lastChecked.get(String(item.device_id)) || 0) >= 55000
+  );
+  let next = 0, checked = 0, up = 0, down = 0, unknown = 0, failed = 0;
+  const outcomes = [];
+  const workers = Array.from({ length: Math.min(3, tasks.length) }, async () => {
+    while (next < tasks.length) {
+      const item = tasks[next++];
+      try {
+        const response = await rilRequest(item.map_url, {}, jar);
+        const html = await response.text();
+        if (!response.ok || /login\.php/i.test(response.url)) {
+          throw new Error("GPS History session unavailable (HTTP " + response.status + ")");
+        }
+        const direction = rilCalculateLatestDirection(html);
+        outcomes.push({ device_id: item.device_id, direction });
+        checked++;
+        if (direction === "up") up++;
+        else if (direction === "down") down++;
+        else unknown++;
+      } catch (error) {
+        failed++;
+        console.warn("RILAPP GPS History failed for", item.device_id, String(error));
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (outcomes.length) {
+    await db.batch(outcomes.map(x => db.prepare(
+      "UPDATE telemetry SET direction=?,direction_updated_at=CURRENT_TIMESTAMP WHERE device_id=?"
+    ).bind(x.direction, x.device_id)));
+  }
+  return { checked, up, down, unknown, failed };
 }
 
 async function runRilappFeed(env) {
@@ -1268,7 +1470,8 @@ async function runRilappFeed(env) {
         end_time: c[endIndex] || null,
         end_ts: endTs,
         end_address: c[addressIndex] || null,
-        km_run: c[kmIndex] || null
+        km_run: c[kmIndex] || null,
+        map_url: rilGetDeviceMapUrlFromRow(row.raw) || (old && old.map_url) || ""
       });
     }
   }
@@ -1313,11 +1516,14 @@ async function runRilappFeed(env) {
     )
   );
   await env.DB.batch(statements);
+  const directionStats = await rilRefreshDirections(env.DB, latest, jar);
+  await set(env.DB, "last_direction_checked", String(directionStats.checked));
+  await set(env.DB, "last_direction_failures", String(directionStats.failed));
   await set(env.DB, "last_ingest", new Date().toISOString());
   await set(env.DB, "last_feed_error", "");
   await set(env.DB, "last_rilapp_rows", String(latest.size));
   await set(env.DB, "last_rilapp_batteries", String(batteryMap.size));
-  return { ok: true, rows: latest.size, batteries: batteryMap.size, window: period.label };
+  return { ok: true, rows: latest.size, batteries: batteryMap.size, directions: directionStats, window: period.label };
 }
 
 async function tick(env) {
