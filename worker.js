@@ -464,6 +464,7 @@ async function cmd(env, db, msg) {
             " | Difference >= 0.20 KM: " + (result.history?.discrepancies || 0) +
             " | Failed: " + (result.history?.failed || 0) +
             " | Unavailable: " + (result.history?.unavailable || 0) +
+            " | Missing internal device ID: " + (result.history?.missingMapId || 0) +
             "\nWindow: " + result.window
           );
         } else {
@@ -1495,15 +1496,31 @@ async function rilRefreshHistoryDistances(db, latest, period, jar) {
   const tasks = Array.from(latest.values()).filter(item =>
     now - (checkedAt.get(String(item.device_id)) || 0) >= 55000
   );
-  let next = 0, checked = 0, discrepancies = 0, failed = 0, unavailable = 0;
+  let next = 0, checked = 0, discrepancies = 0, failed = 0, unavailable = 0, missingMapId = 0;
   const updates = [];
   const api = "https://ip3.rilapp.com/railways/vehicleMapGoogleFilterNewAPI.php";
   const workers = Array.from({ length: Math.min(3, tasks.length) }, async () => {
     while (next < tasks.length) {
       const item = tasks[next++];
       try {
+        // The original dashboard passes the internal deviceid from the row's
+        // liveMapGoogle.php link, NOT the visible GPS ID stored as item.device_id.
+        let historyDeviceId = "";
+        try {
+          const mapUrl = new URL(String(item.map_url || ""));
+          if (mapUrl.origin === "https://ip3.rilapp.com" &&
+              /liveMapGoogle\.php/i.test(mapUrl.pathname)) {
+            historyDeviceId = String(mapUrl.searchParams.get("deviceid") || "").trim();
+          }
+        } catch (_) {}
+        if (!historyDeviceId) {
+          missingMapId++;
+          unavailable++;
+          console.warn("History Distance skipped: internal deviceid missing in liveMap URL for GPS ID", item.device_id);
+          continue;
+        }
         const query = new URLSearchParams({
-          deviceid: String(item.device_id),
+          deviceid: historyDeviceId,
           fdate: period.startDate,
           ftime: "23:00",
           tdate: period.endDate,
@@ -1538,7 +1555,7 @@ async function rilRefreshHistoryDistances(db, latest, period, jar) {
       "UPDATE telemetry SET history_km=?,history_checked_at=CURRENT_TIMESTAMP WHERE device_id=?"
     ).bind(x.history_km, x.device_id)));
   }
-  return { requested: tasks.length, checked, discrepancies, failed, unavailable };
+  return { requested: tasks.length, checked, discrepancies, failed, unavailable, missingMapId };
 }
 
 async function runRilappFeed(env) {
