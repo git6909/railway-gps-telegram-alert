@@ -211,6 +211,26 @@ async function sendKeyboard(env, chat, text, keyboard, entities = []) {
   if (!d.ok) console.error("Telegram keyboard error", JSON.stringify(d).slice(0, 300));
   return !!d.ok;
 }
+async function setTelegramMenu(env, chat) {
+  if (!env.TELEGRAM_BOT_TOKEN) return false;
+  const base = "https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/";
+  const commands = [
+    {command:"start",description:"Open GPS controller menu"},
+    {command:"s",description:"GPS status by section/device"},
+    {command:"less",description:"Find devices below KM Run"},
+    {command:"devices",description:"List active GPS devices"},
+    {command:"status",description:"Show a device status"},
+    {command:"sync",description:"Refresh RILAPP GPS data"},
+    {command:"help",description:"Show all commands"}
+  ];
+  const c = await fetch(base+"setMyCommands",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({commands})});
+  const cd = await c.json();
+  const m = await fetch(base+"setChatMenuButton",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:chat,menu_button:{type:"commands"}})});
+  const md = await m.json();
+  if (!cd.ok || !md.ok) console.error("Telegram menu setup failed",JSON.stringify({commands:cd,menu:md}).slice(0,500));
+  return !!cd.ok && !!md.ok;
+}
+
 async function answerCallback(env, callbackId, text = "") {
   if (!env.TELEGRAM_BOT_TOKEN || !callbackId) return;
   await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/answerCallbackQuery", {
@@ -292,6 +312,22 @@ function formatDialableMobile(value) {
   if (raw.startsWith("+") && digits.length >= 8 && digits.length <= 15) return "+" + digits;
   return "";
 }
+async function sendLessResults(env, db, chat, limit) {
+  const expr = "CAST(REPLACE(REPLACE(TRIM(t.km_run),' km',''),',','.') AS REAL)";
+  const result = await db.prepare(
+    "SELECT d.device_id,d.section,d.patrol_no,t.km_run,t.end_time FROM devices d JOIN telemetry t ON t.device_id=d.device_id " +
+    "LEFT JOIN ignored_devices i ON i.device_id=d.device_id WHERE d.active=1 AND i.device_id IS NULL " +
+    "AND t.km_run IS NOT NULL AND TRIM(t.km_run)<>'' AND " + expr + " < ? ORDER BY " + expr + ",d.section,d.patrol_no"
+  ).bind(limit).all();
+  if (!result.results.length) return send(env,chat,"No active device found with KM Run below "+limit.toFixed(2)+" km.");
+  const lines=["DEVICES BELOW "+limit.toFixed(2)+" KM RUN","Found: "+result.results.length,""];
+  for (const x of result.results) {
+    const km=Number(String(x.km_run).replace(/\s*km$/i,"").replace(",","."));
+    lines.push(x.section+" "+x.patrol_no+" | "+x.device_id+" | KM Run: "+(Number.isFinite(km)?km.toFixed(2):"0.00")+" | End: "+(x.end_time||"-"));
+  }
+  await send(env,chat,lines.join("\n"));
+}
+
 async function cmd(env, db, msg) {
   const chat = msg.chat?.id;
   const from = S(msg.from?.id);
@@ -305,22 +341,28 @@ async function cmd(env, db, msg) {
   }
 
   const full = S(msg.text);
-  const line = full.split("\n", 1)[0];
-
-  const m = line.match(
-    /^\/(\w+)(?:@\w+)?(?:\s+(.*))?$/
-  );
-
+  const line = full.split("\n",1)[0];
+  const m = line.match(/^\/(\w+)(?:@\w+)?(?:\s+(.*))?$/);
+  const pendingKey = "less_wait:" + String(chat);
+  if (!m && await setting(db,pendingKey,"") === "on") {
+    const value=Number(full.trim());
+    if (!Number.isFinite(value)||value<0||!/^\d+(?:\.\d{1,2})?$/.test(full.trim())) {
+      await send(env,chat,"Invalid KM. Enter up to 2 decimal places, e.g. 12.50, or /cancel.");
+      return;
+    }
+    await set(db,pendingKey,"off");
+    return sendLessResults(env,db,chat,value);
+  }
   if (!m) return;
-
-  const c = m[1].toLowerCase();
-  const a = m[2] || "";
-  const p = a.trim() ? a.trim().split(/\s+/) : [];
-  const id = p[0] || "";
+  const c=m[1].toLowerCase();
+  const a=m[2]||"";
+  const p=a.trim()?a.trim().split(/\s+/):[];
+  const id=p[0]||"";
 
   try {
 
     if (c === "start" || c === "help") {
+      await setTelegramMenu(env, chat);
       await send(env, chat,
 `Railway GPS Controller
 
@@ -338,11 +380,33 @@ async function cmd(env, db, msg) {
 /status ID
 /deviceinfo ID
 /s RJK|RG|CH [P#|ID] (section, patrol or ID status)
+/less (then send KM, e.g. 12.50)
 /monitor on|off
 /stale [MINUTES]
 /pending
 /health
 /sync (manual RILAPP refresh)`);
+      return;
+    }
+
+    if (c === "menu") {
+      const ok=await setTelegramMenu(env,chat);
+      await send(env,chat,ok?"Telegram Menu button enabled.":"Could not configure Telegram Menu button.");
+      return;
+    }
+    if (c === "cancel") { await set(db,pendingKey,"off"); await send(env,chat,"Cancelled."); return; }
+    if (c === "less") {
+      const direct=a.trim();
+      if (direct) {
+        if (!/^\d+(?:\.\d{1,2})?$/.test(direct)||!Number.isFinite(Number(direct))) {
+          await send(env,chat,"Format: /less 12.50 (maximum 2 decimal places)."); return;
+        }
+        await set(db,pendingKey,"off");
+        await sendLessResults(env,db,chat,Number(direct));
+      } else {
+        await set(db,pendingKey,"on");
+        await send(env,chat,"Send KM limit, e.g. 12.50. Up to 2 decimal places. Send /cancel to cancel.");
+      }
       return;
     }
 
