@@ -225,10 +225,16 @@ async function setTelegramMenu(env, chat) {
   ];
   const c = await fetch(base+"setMyCommands",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({commands})});
   const cd = await c.json();
-  const m = await fetch(base+"setChatMenuButton",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:chat,menu_button:{type:"commands"}})});
+  // Set the default menu button for every private chat, then override this chat explicitly.
+  const m = await fetch(base+"setChatMenuButton",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({menu_button:{type:"commands"}})});
   const md = await m.json();
-  if (!cd.ok || !md.ok) console.error("Telegram menu setup failed",JSON.stringify({commands:cd,menu:md}).slice(0,500));
-  return !!cd.ok && !!md.ok;
+  const personal = await fetch(base+"setChatMenuButton",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:chat,menu_button:{type:"commands"}})});
+  const pd = await personal.json();
+  const verify = await fetch(base+"getChatMenuButton?chat_id="+encodeURIComponent(String(chat)));
+  const vd = await verify.json();
+  const menuOk = !!cd.ok && !!md.ok && !!pd.ok && !!vd.ok && vd.result?.type === "commands";
+  if (!menuOk) console.error("Telegram menu setup/verify failed",JSON.stringify({commands:cd,default:md,chat:pd,verify:vd}).slice(0,900));
+  return menuOk;
 }
 
 async function answerCallback(env, callbackId, text = "") {
