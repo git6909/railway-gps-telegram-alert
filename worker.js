@@ -31,6 +31,8 @@ const SQL = [
     gps_on INTEGER,
     direction TEXT,
     direction_updated_at TEXT,
+    history_km REAL,
+    history_checked_at TEXT,
     payload TEXT,
     received_at TEXT DEFAULT CURRENT_TIMESTAMP,
     last_alert_at INTEGER,
@@ -117,6 +119,30 @@ function formatDirection(direction) {
   return "Unknown (insufficient/unclear GPS points)";
 }
 
+
+function parseKmValue(value) {
+  const match = String(value ?? "").replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const number = Number(match[0]);
+  return Number.isFinite(number) ? number : null;
+}
+function kmDifferenceMeters(firstKm, secondKm) {
+  const first = parseKmValue(firstKm);
+  const second = parseKmValue(secondKm);
+  if (first === null || second === null) return null;
+  return Math.abs(Math.round(first * 1000) - Math.round(second * 1000));
+}
+function formatKmRun(kmRun, historyKm) {
+  const reportKm = parseKmValue(kmRun);
+  if (reportKm === null) return S(kmRun) || "-";
+  const display = reportKm.toFixed(2) + " KM";
+  const history = Number(historyKm);
+  if (Number.isFinite(history) && kmDifferenceMeters(reportKm, history) >= 200) {
+    return display + " (History: " + history.toFixed(2) + " KM)";
+  }
+  return display;
+}
+
 function phoneEntities(text) {
   const entities = [];
   for (const match of String(text).matchAll(/\+91\d{10}/g)) {
@@ -135,7 +161,7 @@ async function init(db) {
   } catch (e) {
     if (!String(e).toLowerCase().includes("duplicate column")) throw e;
   }
-  for (const [column, definition] of [["direction", "TEXT"], ["direction_updated_at", "TEXT"]]) {
+  for (const [column, definition] of [["direction", "TEXT"], ["direction_updated_at", "TEXT"], ["history_km", "REAL"], ["history_checked_at", "TEXT"]]) {
     try {
       await db.prepare("ALTER TABLE telemetry ADD COLUMN " + column + " " + definition).run();
     } catch (e) {
@@ -266,7 +292,8 @@ async function showDevicePicker(env, db, chat, section) {
 async function showDeviceStatus(env, db, chat, section, id) {
   const r = await db.prepare(`
     SELECT d.*,m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
-    t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at
+    t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at,
+    t.history_km,t.history_checked_at
     FROM devices d LEFT JOIN mobile_map m ON m.device_id=d.device_id
     LEFT JOIN telemetry t ON t.device_id=d.device_id
     WHERE d.active=1 AND d.section=? AND d.device_id=?
@@ -279,7 +306,7 @@ async function showDeviceStatus(env, db, chat, section, id) {
     r.section + " " + r.patrol_no + " | " + r.device_id,
     "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
     "End: " + (r.end_time || "No data") + " (" + age + ")",
-    "KM: " + (r.km_run || "-"), "Address: " + (r.end_address || "-"),
+    "KM Run: " + formatKmRun(r.km_run, r.history_km), "Address: " + (r.end_address || "-"),
     "Battery: " + (r.battery || "-"),
     "Beat: " + formatBeat(r.device_id),
     "Direction: " + formatDirection(r.direction),
@@ -321,15 +348,14 @@ function formatDialableMobile(value) {
 async function sendLessResults(env, db, chat, limit) {
   const expr = "CAST(REPLACE(REPLACE(TRIM(t.km_run),' km',''),',','.') AS REAL)";
   const result = await db.prepare(
-    "SELECT d.device_id,d.section,d.patrol_no,t.km_run,t.end_time FROM devices d JOIN telemetry t ON t.device_id=d.device_id " +
+    "SELECT d.device_id,d.section,d.patrol_no,t.km_run,t.history_km,t.end_time FROM devices d JOIN telemetry t ON t.device_id=d.device_id " +
     "LEFT JOIN ignored_devices i ON i.device_id=d.device_id WHERE d.active=1 AND i.device_id IS NULL " +
     "AND t.km_run IS NOT NULL AND TRIM(t.km_run)<>'' AND " + expr + " < ? ORDER BY " + expr + ",d.section,d.patrol_no"
   ).bind(limit).all();
   if (!result.results.length) return send(env,chat,"No active device found with KM Run below "+limit.toFixed(2)+" km.");
   const lines=["DEVICES BELOW "+limit.toFixed(2)+" KM RUN","Found: "+result.results.length,""];
   for (const x of result.results) {
-    const km=Number(String(x.km_run).replace(/\s*km$/i,"").replace(",","."));
-    lines.push(x.section+" "+x.patrol_no+" | "+x.device_id+" | KM Run: "+(Number.isFinite(km)?km.toFixed(2):"0.00")+" | End: "+(x.end_time||"-"));
+    lines.push(x.section+" "+x.patrol_no+" | "+x.device_id+" | KM Run: "+formatKmRun(x.km_run,x.history_km)+" | End: "+(x.end_time||"-"));
   }
   await send(env,chat,lines.join("\n"));
 }
@@ -430,6 +456,10 @@ async function cmd(env, db, msg) {
             " | DOWN: " + (result.directions?.down || 0) +
             " | Unknown: " + (result.directions?.unknown || 0) +
             " | Failed: " + (result.directions?.failed || 0) +
+            "\nDistance History checked: " + (result.history?.checked || 0) +
+            " | Difference >= 0.20 KM: " + (result.history?.discrepancies || 0) +
+            " | Failed: " + (result.history?.failed || 0) +
+            " | Unavailable: " + (result.history?.unavailable || 0) +
             "\nWindow: " + result.window
           );
         } else {
@@ -886,7 +916,8 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       const result = await db.prepare(`
         SELECT d.device_id,d.section,d.patrol_no,d.active,
         m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
-        t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at
+        t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at,
+        t.history_km,t.history_checked_at
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
         LEFT JOIN telemetry t ON t.device_id=d.device_id
@@ -909,7 +940,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           r.section + " " + r.patrol_no + " | " + r.device_id,
           "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
           "End: " + (r.end_time || "No data") + " (" + age + ")",
-          "KM: " + (r.km_run || "-"),
+          "KM Run: " + formatKmRun(r.km_run, r.history_km),
           "Address: " + (r.end_address || "-"),
           "Battery: " + (r.battery || "-"),
           "Beat: " + formatBeat(r.device_id),
@@ -941,7 +972,8 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       const r = await db.prepare(`
         SELECT d.*,m.mobile,m.mobile2,m.person_name,
         t.end_time,t.end_ts,t.km_run,t.end_address,
-        t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at
+        t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at,
+        t.history_km,t.history_checked_at
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
         LEFT JOIN telemetry t ON t.device_id=d.device_id
@@ -963,7 +995,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
         `${r.device_id} | ${r.section} ${r.patrol_no} | ${r.active ? "ACTIVE" : "INACTIVE"}
 GPS: ${r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"}
 End: ${r.end_time || "No data"} (${age})
-KM: ${r.km_run || "-"}
+KM Run: ${formatKmRun(r.km_run, r.history_km)}
 Address: ${r.end_address || "-"}
 Battery: ${r.battery || "-"}
 Beat: ${formatBeat(r.device_id)}
@@ -1441,6 +1473,70 @@ async function rilRefreshDirections(db, latest, jar) {
   return { checked, up, down, unknown, failed };
 }
 
+
+function rilParseHistoryDistance(html) {
+  const text = rilHtmlText(html);
+  const match = text.match(/Distance\s*Travelled\s*:\s*([\d,]+(?:\.\d+)?)\s*KM/i);
+  if (!match) return null;
+  const value = Number(match[1].replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+async function rilRefreshHistoryDistances(db, latest, period, jar) {
+  const rows = await db.prepare("SELECT device_id,history_checked_at FROM telemetry").all();
+  const checkedAt = new Map(rows.results.map(x => [
+    String(x.device_id), Date.parse(String(x.history_checked_at || "")) || 0
+  ]));
+  const now = Date.now();
+  const tasks = Array.from(latest.values()).filter(item =>
+    now - (checkedAt.get(String(item.device_id)) || 0) >= 55000
+  );
+  let next = 0, checked = 0, discrepancies = 0, failed = 0, unavailable = 0;
+  const updates = [];
+  const api = "https://ip3.rilapp.com/railways/vehicleMapGoogleFilterNewAPI.php";
+  const workers = Array.from({ length: Math.min(3, tasks.length) }, async () => {
+    while (next < tasks.length) {
+      const item = tasks[next++];
+      try {
+        const query = new URLSearchParams({
+          deviceid: String(item.device_id),
+          fdate: period.startDate,
+          ftime: "23:00",
+          tdate: period.endDate,
+          ttime: period.endTime,
+          Submit: "Update"
+        });
+        const response = await rilRequest(api + "?" + query.toString(), {}, jar);
+        const html = await response.text();
+        if (!response.ok || /login\.php/i.test(response.url) ||
+            (/type=["']password["']/i.test(html) && /login|sign.?in/i.test(html))) {
+          throw new Error("GPS History session unavailable (HTTP " + response.status + ")");
+        }
+        const distance = rilParseHistoryDistance(html);
+        if (distance === null) {
+          unavailable++;
+          console.warn("History Distance label not found for", item.device_id);
+          continue;
+        }
+        updates.push({ device_id: item.device_id, history_km: distance });
+        checked++;
+        const reportKm = parseKmValue(item.km_run);
+        if (reportKm !== null && kmDifferenceMeters(reportKm, distance) >= 200) discrepancies++;
+      } catch (error) {
+        failed++;
+        console.warn("RILAPP History Distance failed for", item.device_id, String(error));
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (updates.length) {
+    await db.batch(updates.map(x => db.prepare(
+      "UPDATE telemetry SET history_km=?,history_checked_at=CURRENT_TIMESTAMP WHERE device_id=?"
+    ).bind(x.history_km, x.device_id)));
+  }
+  return { requested: tasks.length, checked, discrepancies, failed, unavailable };
+}
+
 async function runRilappFeed(env) {
   const period = rilNightPeriod();
   if (env.DB) await set(env.DB, "last_feed_attempt", new Date().toISOString());
@@ -1449,6 +1545,12 @@ async function runRilappFeed(env) {
   }
   if (!env.DB) throw new Error("D1 DB binding missing");
   await init(env.DB);
+  const historyPeriodKey = period.startDate + "|23:00|" + period.endDate;
+  const previousHistoryPeriod = await setting(env.DB, "history_period", "");
+  if (previousHistoryPeriod !== historyPeriodKey) {
+    await env.DB.prepare("UPDATE telemetry SET history_km=NULL,history_checked_at=NULL").run();
+    await set(env.DB, "history_period", historyPeriodKey);
+  }
   const configured = await env.DB.prepare(
     "SELECT device_id FROM devices WHERE active=1"
   ).all();
@@ -1587,13 +1689,17 @@ async function runRilappFeed(env) {
   );
   await env.DB.batch(statements);
   const directionStats = await rilRefreshDirections(env.DB, latest, jar);
+  const historyStats = await rilRefreshHistoryDistances(env.DB, latest, period, jar);
+  await set(env.DB, "last_history_checked", String(historyStats.checked));
+  await set(env.DB, "last_history_discrepancies", String(historyStats.discrepancies));
+  await set(env.DB, "last_history_failed", String(historyStats.failed));
   await set(env.DB, "last_direction_checked", String(directionStats.checked));
   await set(env.DB, "last_direction_failures", String(directionStats.failed));
   await set(env.DB, "last_ingest", new Date().toISOString());
   await set(env.DB, "last_feed_error", "");
   await set(env.DB, "last_rilapp_rows", String(latest.size));
   await set(env.DB, "last_rilapp_batteries", String(batteryMap.size));
-  return { ok: true, rows: latest.size, batteries: batteryMap.size, directions: directionStats, window: period.label };
+  return { ok: true, rows: latest.size, batteries: batteryMap.size, directions: directionStats, history: historyStats, window: period.label };
 }
 
 async function tick(env) {
@@ -1636,7 +1742,7 @@ async function tick(env) {
   } else {
     const old = await env.DB.prepare(
       "SELECT d.device_id,d.section,d.patrol_no," +
-      "t.start_time,t.end_time,t.end_ts,t.km_run,t.end_address," +
+      "t.start_time,t.end_time,t.end_ts,t.km_run,t.history_km,t.end_address," +
       "t.battery,t.gps_on,t.last_alert_at,m.mobile,m.mobile2,m.person_name " +
       "FROM devices d " +
       "LEFT JOIN telemetry t ON t.device_id=d.device_id " +
@@ -1669,7 +1775,7 @@ async function tick(env) {
             "Name: " + (x.person_name || "Not mapped"),
             "Start Time: " + (x.start_time || "-"),
             "Last Update: " + (x.end_time || "No data") + " (" + age + ")",
-            "KM Run: " + (x.km_run || "-"),
+            "KM Run: " + formatKmRun(x.km_run, x.history_km),
             "Address: " + (x.end_address || "-"),
             "Battery: " + (x.battery || "-"),
             "GPS: " + (x.gps_on === 0 ? "OFF" : x.gps_on === 1 ? "ON" : "Unknown"),
