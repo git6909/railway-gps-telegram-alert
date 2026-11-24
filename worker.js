@@ -136,8 +136,12 @@ function formatKmRun(kmRun, historyKm) {
   const reportKm = parseKmValue(kmRun);
   if (reportKm === null) return S(kmRun) || "-";
   const display = reportKm.toFixed(2) + " KM";
+  // NULL/empty means History Distance was not fetched; never coerce it to 0.
+  if (historyKm === null || historyKm === undefined || String(historyKm).trim() === "") {
+    return display;
+  }
   const history = Number(historyKm);
-  if (Number.isFinite(history) && kmDifferenceMeters(reportKm, history) >= 200) {
+  if (Number.isFinite(history) && history >= 0 && kmDifferenceMeters(reportKm, history) >= 200) {
     return display + " (History: " + history.toFixed(2) + " KM)";
   }
   return display;
