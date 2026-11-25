@@ -26,11 +26,8 @@ const SQL = [
     end_ts INTEGER,
     km_run TEXT,
     end_address TEXT,
-    battery TEXT,
     start_time TEXT,
     gps_on INTEGER,
-    direction TEXT,
-    direction_updated_at TEXT,
     history_km REAL,
     history_checked_at TEXT,
     payload TEXT,
@@ -113,11 +110,6 @@ function formatBeat(deviceId) {
   const beat = BEAT_BY_GPS_ID[S(deviceId)];
   return beat ? beat[0] + " – " + beat[1] : "Not mapped";
 }
-function formatDirection(direction) {
-  if (direction === "up") return "⟹ UP (railway KM increasing)";
-  if (direction === "down") return "⟸ DOWN (railway KM decreasing)";
-  return "Unknown (insufficient/unclear GPS points)";
-}
 
 
 function parseKmValue(value) {
@@ -165,7 +157,7 @@ async function init(db) {
   } catch (e) {
     if (!String(e).toLowerCase().includes("duplicate column")) throw e;
   }
-  for (const [column, definition] of [["direction", "TEXT"], ["direction_updated_at", "TEXT"], ["history_km", "REAL"], ["history_checked_at", "TEXT"]]) {
+  for (const [column, definition] of [["history_km", "REAL"], ["history_checked_at", "TEXT"]]) {
     try {
       await db.prepare("ALTER TABLE telemetry ADD COLUMN " + column + " " + definition).run();
     } catch (e) {
@@ -296,7 +288,7 @@ async function showDevicePicker(env, db, chat, section) {
 async function showDeviceStatus(env, db, chat, section, id) {
   const r = await db.prepare(`
     SELECT d.*,m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
-    t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at,
+    t.end_address,t.gps_on,t.received_at,
     t.history_km,t.history_checked_at
     FROM devices d LEFT JOIN mobile_map m ON m.device_id=d.device_id
     LEFT JOIN telemetry t ON t.device_id=d.device_id
@@ -311,10 +303,7 @@ async function showDeviceStatus(env, db, chat, section, id) {
     "GPS: " + (r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"),
     "End: " + (r.end_time || "No data") + " (" + age + ")",
     "KM Run: " + formatKmRun(r.km_run, r.history_km), "Address: " + (r.end_address || "-"),
-    "Battery: " + (r.battery || "-"),
     "Beat: " + formatBeat(r.device_id),
-    "Direction: " + formatDirection(r.direction),
-    "Direction checked: " + (r.direction_updated_at || "never"),
     "Phone 1: " + (phone || "not mapped"),
     "Phone 2: " + (phone2 || "not mapped")
   ].join("\n");
@@ -454,13 +443,7 @@ async function cmd(env, db, msg) {
           await set(db, "last_feed_error", "");
           await send(env, chat,
             "RILAPP SYNC SUCCESS\nRows updated: " + result.rows +
-            "\nBattery matches: " + result.batteries +
-            "\nGPS History checked: " + (result.directions?.checked || 0) +
-            " | UP: " + (result.directions?.up || 0) +
-            " | DOWN: " + (result.directions?.down || 0) +
-            " | Unknown: " + (result.directions?.unknown || 0) +
-            " | Failed: " + (result.directions?.failed || 0) +
-            "\nDistance History checked: " + (result.history?.checked || 0) +
+                                    "\nDistance History checked: " + (result.history?.checked || 0) +
             " | Difference >= 0.20 KM: " + (result.history?.discrepancies || 0) +
             " | Failed: " + (result.history?.failed || 0) +
             " | Unavailable: " + (result.history?.unavailable || 0) +
@@ -921,7 +904,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       const result = await db.prepare(`
         SELECT d.device_id,d.section,d.patrol_no,d.active,
         m.mobile,m.mobile2,m.person_name,t.end_time,t.end_ts,t.km_run,
-        t.end_address,t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at,
+        t.end_address,t.gps_on,t.received_at,
         t.history_km,t.history_checked_at
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
@@ -947,9 +930,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
           "End: " + (r.end_time || "No data") + " (" + age + ")",
           "KM Run: " + formatKmRun(r.km_run, r.history_km),
           "Address: " + (r.end_address || "-"),
-          "Battery: " + (r.battery || "-"),
           "Beat: " + formatBeat(r.device_id),
-          "Direction: " + formatDirection(r.direction),
           "Phone 1: " + (phone || "not mapped"),
           "Phone 2: " + (phone2 || "not mapped")
         ].join("\n");
@@ -977,7 +958,7 @@ Feed error: ${await setting(db, "last_feed_error", "none") || "none"}`);
       const r = await db.prepare(`
         SELECT d.*,m.mobile,m.mobile2,m.person_name,
         t.end_time,t.end_ts,t.km_run,t.end_address,
-        t.battery,t.gps_on,t.received_at,t.direction,t.direction_updated_at,
+        t.gps_on,t.received_at,
         t.history_km,t.history_checked_at
         FROM devices d
         LEFT JOIN mobile_map m ON m.device_id=d.device_id
@@ -1002,10 +983,7 @@ GPS: ${r.gps_on === null ? "unknown" : r.gps_on ? "ON" : "OFF"}
 End: ${r.end_time || "No data"} (${age})
 KM Run: ${formatKmRun(r.km_run, r.history_km)}
 Address: ${r.end_address || "-"}
-Battery: ${r.battery || "-"}
 Beat: ${formatBeat(r.device_id)}
-Direction: ${formatDirection(r.direction)}
-Direction checked: ${r.direction_updated_at || "never"}
 Phone 1: ${phone || "not mapped"}\nPhone 2: ${phone2 || "not mapped"}`;
 
       if (c === "deviceinfo") {
@@ -1121,16 +1099,15 @@ async function ingest(req, env, db) {
       db.prepare(`
         INSERT INTO telemetry(
           device_id,end_time,end_ts,km_run,
-          end_address,battery,start_time,gps_on,
+          end_address,start_time,gps_on,
           payload,received_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
         ON CONFLICT(device_id) DO UPDATE SET
           end_time=excluded.end_time,
           end_ts=excluded.end_ts,
           km_run=excluded.km_run,
           end_address=excluded.end_address,
-          battery=excluded.battery,
           start_time=excluded.start_time,
           gps_on=COALESCE(excluded.gps_on,telemetry.gps_on),
           payload=excluded.payload,
@@ -1141,7 +1118,6 @@ async function ingest(req, env, db) {
         ts || null,
         x.km_run == null ? null : String(x.km_run),
         x.end_address || null,
-        x.battery == null ? null : String(x.battery),
         x.start_time || null,
         gps,
         JSON.stringify(x)
@@ -1321,164 +1297,6 @@ function rilParseDateTime(value, period) {
   return Date.UTC(parts[2], parts[1] - 1, parts[0], hour, minute, second) - 330 * 60 * 1000;
 }
 
-function rilParseBattery(value) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (!text) return null;
-  if (/low\s*battery/i.test(text)) return "Low Battery";
-  const match = text.match(/^(\d{1,3})(?:\s*%)?$/);
-  if (!match) return null;
-  const number = Number(match[1]);
-  return number >= 0 && number <= 100 ? number + "%" : null;
-}
-
-function rilExtractBatteryForRow(row, batteryIndex) {
-  const cells = row.cells;
-  if (!cells.length) return null;
-  if (batteryIndex >= 0 && cells[batteryIndex]) {
-    const parsed = rilParseBattery(cells[batteryIndex]);
-    if (parsed) return parsed;
-  }
-  for (let i = 0; i < cells.length - 1; i++) {
-    if (/^\d{13,16}$/.test(cells[i])) {
-      const parsed = rilParseBattery(cells[i + 1]);
-      if (parsed) return parsed;
-    }
-  }
-  for (const cell of cells) {
-    const parsed = rilParseBattery(cell);
-    if (parsed === "Low Battery") return parsed;
-  }
-  return null;
-}
-
-function rilParseBatteryPage(html) {
-  const map = new Map();
-  for (const tableMatch of String(html).matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)) {
-    const table = tableMatch[0];
-    const thead = /<thead\b[^>]*>([\s\S]*?)<\/thead>/i.exec(table);
-    const headers = thead
-      ? Array.from(thead[1].matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi), x => rilHtmlText(x[1]))
-      : [];
-    const batteryIndex = headers.findIndex(x => /battery|batt(?:ery)?\s*%/i.test(x));
-    for (const row of rilRowsFromTable(table)) {
-      if (!/liveMapGoogle\.php/i.test(row.raw) || !/deviceid=/i.test(row.raw)) continue;
-      const linkMatch = row.raw.match(/<a\b[^>]*href=["'][^"']*deviceid=[^"']*["'][^>]*>([\s\S]*?)<\/a>/i);
-      if (!linkMatch) continue;
-      const gpsId = rilExtractGpsId(rilHtmlText(linkMatch[1]), row.raw);
-      if (!/^\d{4,8}$/.test(gpsId)) continue;
-      const battery = rilExtractBatteryForRow(row, batteryIndex);
-      if (battery) map.set(gpsId, battery);
-    }
-  }
-  return map;
-}
-
-
-const RIL_DIRECTION_LC_KM = new Map([
-  [37, 71.45], [38, 73.05], [39, 74.75], [40, 77.15], [41, 79.15],
-  [48, 91.25], [49, 93.35], [50, 95.75], [51, 97.85],
-  [53, 105.3], [56, 109.5], [560, 110.2], [60, 115.4],
-  [66, 129.4], [73, 141.35], [77, 149.45]
-]);
-
-function rilKmFromDirectionAddress(address) {
-  const value = String(address || "").replace(/\s+/g, " ").trim();
-  if (!value) return null;
-  if (/LC[-\s]*56\s*\/\s*A/i.test(value)) return RIL_DIRECTION_LC_KM.get(560);
-  const chainage = value.match(/(\d+)\s*\/\s*(\d+)/);
-  if (chainage) {
-    const km = Number(chainage[1]);
-    const partText = chainage[2];
-    const part = Number(partText);
-    if (!Number.isFinite(km) || !Number.isFinite(part)) return null;
-    return km + (partText.length === 1 ? part * 0.1 : part / 1000);
-  }
-  const lc = value.match(/LC[-\s.]*NO\.?\s*(\d+)|LC[-\s]*(\d+)/i);
-  const lcNumber = lc ? Number(lc[1] || lc[2]) : null;
-  return lcNumber !== null && Number.isFinite(lcNumber)
-    ? (RIL_DIRECTION_LC_KM.get(lcNumber) ?? null) : null;
-}
-
-function rilNormalizeTrackTimestamp(value) {
-  if (value == null || value === "") return null;
-  const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric > 0) return numeric > 1e12 ? numeric : numeric * 1000;
-  const parsed = Date.parse(String(value));
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function rilExtractHistoryPositions(html) {
-  const match = String(html || "").match(/(?:var|let|const)\s+(?:poisitionsdata|positionsdata)\s*=\s*(\[[\s\S]*?\])\s*;/i);
-  if (!match) return [];
-  try {
-    const parsed = JSON.parse(match[1]);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_) {
-    return [];
-  }
-}
-
-function rilCalculateLatestDirection(html) {
-  const positions = rilExtractHistoryPositions(html);
-  const trend = [];
-  for (const point of positions) {
-    const km = rilKmFromDirectionAddress(point && point.address);
-    const timestamp = rilNormalizeTrackTimestamp(point && point.timestamp);
-    if (km !== null && timestamp !== null) trend.push({ km, timestamp });
-  }
-  trend.sort((a, b) => a.timestamp - b.timestamp);
-  if (trend.length < 2) return null;
-  // Match the supplied dashboard: ignore movement of 50 metres or less.
-  for (let i = trend.length - 1; i > 0; i--) {
-    const difference = trend[i].km - trend[i - 1].km;
-    if (difference > 0.05) return "up";
-    if (difference < -0.05) return "down";
-  }
-  return null;
-}
-
-async function rilRefreshDirections(db, latest, jar) {
-  const current = await db.prepare("SELECT device_id,direction_updated_at FROM telemetry").all();
-  const lastChecked = new Map(current.results.map(x => [
-    String(x.device_id), Date.parse(String(x.direction_updated_at || "")) || 0
-  ]));
-  const now = Date.now();
-  const tasks = Array.from(latest.values()).filter(item =>
-    item.map_url && now - (lastChecked.get(String(item.device_id)) || 0) >= 55000
-  );
-  let next = 0, checked = 0, up = 0, down = 0, unknown = 0, failed = 0;
-  const outcomes = [];
-  const workers = Array.from({ length: Math.min(3, tasks.length) }, async () => {
-    while (next < tasks.length) {
-      const item = tasks[next++];
-      try {
-        const response = await rilRequest(item.map_url, {}, jar);
-        const html = await response.text();
-        if (!response.ok || /login\.php/i.test(response.url)) {
-          throw new Error("GPS History session unavailable (HTTP " + response.status + ")");
-        }
-        const direction = rilCalculateLatestDirection(html);
-        outcomes.push({ device_id: item.device_id, direction });
-        checked++;
-        if (direction === "up") up++;
-        else if (direction === "down") down++;
-        else unknown++;
-      } catch (error) {
-        failed++;
-        console.warn("RILAPP GPS History failed for", item.device_id, String(error));
-      }
-    }
-  });
-  await Promise.all(workers);
-  if (outcomes.length) {
-    await db.batch(outcomes.map(x => db.prepare(
-      "UPDATE telemetry SET direction=?,direction_updated_at=CURRENT_TIMESTAMP WHERE device_id=?"
-    ).bind(x.direction, x.device_id)));
-  }
-  return { checked, up, down, unknown, failed };
-}
-
-
 function rilParseHistoryDistance(html) {
   const text = rilHtmlText(html);
   const match = text.match(/Distance\s*Travelled\s*:\s*([\d,]+(?:\.\d+)?)\s*KM/i);
@@ -1581,7 +1399,6 @@ async function runRilappFeed(env) {
   const base = "https://ip3.rilapp.com/railways/";
   const loginUrl = base + "login.php";
   const reportUrl = base + "patrollingReport.php";
-  const batteryUrl = base + "dashboard_deviceListOnly.php";
 
   const login = await rilRequest(loginUrl, {
     method: "POST",
@@ -1684,43 +1501,33 @@ async function runRilappFeed(env) {
     );
   }
 
-  const batteryResponse = await rilRequest(batteryUrl, {}, jar);
-  if (!batteryResponse.ok) throw new Error("RILAPP battery page HTTP " + batteryResponse.status);
-  const batteryMap = rilParseBatteryPage(await batteryResponse.text());
-  for (const [id, item] of latest) {
-    if (batteryMap.has(id)) item.battery = batteryMap.get(id);
-  }
 
-  const sql = "INSERT INTO telemetry(device_id,end_time,end_ts,km_run,end_address,battery,start_time,payload,received_at) " +
-    "VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) " +
+  const sql = "INSERT INTO telemetry(device_id,end_time,end_ts,km_run,end_address,start_time,payload,received_at) " +
+    "VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP) " +
     "ON CONFLICT(device_id) DO UPDATE SET " +
     "end_time=COALESCE(excluded.end_time,telemetry.end_time)," +
     "end_ts=COALESCE(excluded.end_ts,telemetry.end_ts)," +
     "km_run=COALESCE(excluded.km_run,telemetry.km_run)," +
     "end_address=COALESCE(excluded.end_address,telemetry.end_address)," +
-    "battery=COALESCE(excluded.battery,telemetry.battery)," +
+
     "start_time=COALESCE(excluded.start_time,telemetry.start_time)," +
     "payload=excluded.payload,received_at=CURRENT_TIMESTAMP";
   const statements = Array.from(latest.values(), item =>
     env.DB.prepare(sql).bind(
       item.device_id, item.end_time, item.end_ts, item.km_run,
-      item.end_address, item.battery || null, item.start_time,
-      JSON.stringify({ ...item, window: period.label, battery_matches: batteryMap.size })
+      item.end_address, item.start_time,
+      JSON.stringify({ ...item, window: period.label })
     )
   );
   await env.DB.batch(statements);
-  const directionStats = await rilRefreshDirections(env.DB, latest, jar);
   const historyStats = await rilRefreshHistoryDistances(env.DB, latest, period, jar);
   await set(env.DB, "last_history_checked", String(historyStats.checked));
   await set(env.DB, "last_history_discrepancies", String(historyStats.discrepancies));
   await set(env.DB, "last_history_failed", String(historyStats.failed));
-  await set(env.DB, "last_direction_checked", String(directionStats.checked));
-  await set(env.DB, "last_direction_failures", String(directionStats.failed));
   await set(env.DB, "last_ingest", new Date().toISOString());
   await set(env.DB, "last_feed_error", "");
   await set(env.DB, "last_rilapp_rows", String(latest.size));
-  await set(env.DB, "last_rilapp_batteries", String(batteryMap.size));
-  return { ok: true, rows: latest.size, batteries: batteryMap.size, directions: directionStats, history: historyStats, window: period.label };
+  return { ok: true, rows: latest.size, history: historyStats, window: period.label };
 }
 
 async function tick(env) {
@@ -1764,7 +1571,7 @@ async function tick(env) {
     const old = await env.DB.prepare(
       "SELECT d.device_id,d.section,d.patrol_no," +
       "t.start_time,t.end_time,t.end_ts,t.km_run,t.history_km,t.end_address," +
-      "t.battery,t.gps_on,t.last_alert_at,m.mobile,m.mobile2,m.person_name " +
+      "t.gps_on,t.last_alert_at,m.mobile,m.mobile2,m.person_name " +
       "FROM devices d " +
       "LEFT JOIN telemetry t ON t.device_id=d.device_id " +
       "LEFT JOIN ignored_devices i ON i.device_id=d.device_id " +
@@ -1798,7 +1605,6 @@ async function tick(env) {
             "Last Update: " + (x.end_time || "No data") + " (" + age + ")",
             "KM Run: " + formatKmRun(x.km_run, x.history_km),
             "Address: " + (x.end_address || "-"),
-            "Battery: " + (x.battery || "-"),
             "GPS: " + (x.gps_on === 0 ? "OFF" : x.gps_on === 1 ? "ON" : "Unknown"),
             "Call 1: " + (phone || "Not mapped"),
             "Call 2: " + (phone2 || "Not mapped")
@@ -1971,7 +1777,6 @@ export default {
           integration_version: "rilapp-night-feed-v1",
           rilapp_configured: !!(env.RILAPP_USERNAME && env.RILAPP_PASSWORD),
           last_rilapp_rows: await setting(env.DB, "last_rilapp_rows", "never"),
-          last_rilapp_batteries: await setting(env.DB, "last_rilapp_batteries", "never")
         });
 
       } catch (e) {
