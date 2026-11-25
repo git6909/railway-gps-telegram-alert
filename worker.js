@@ -1144,16 +1144,17 @@ function rilISTParts(date = new Date()) {
 function rilNightPeriod(date = new Date()) {
   const p = rilISTParts(date);
   const hour = Number(p.hour), minute = Number(p.minute);
-  const active = hour > 22 || (hour === 22 && minute >= 30) ||
-    hour < 7 || (hour === 7 && minute < 30);
+  // Fetch only from 23:00 IST through the final 07:00 IST report.
+  const active = hour >= 23 || hour < 7 || (hour === 7 && minute === 0);
   const endDate = p.day + "/" + p.month + "/" + p.year;
   const start = new Date(Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day)));
-  start.setUTCDate(start.getUTCDate() - 1);
+  if (hour < 23) start.setUTCDate(start.getUTCDate() - 1);
   const startDate = String(start.getUTCDate()).padStart(2, "0") + "/" +
     String(start.getUTCMonth() + 1).padStart(2, "0") + "/" + start.getUTCFullYear();
+  const endTime = p.hour + ":" + p.minute;
   return {
-    active, startDate, endDate, endTime: p.hour + ":" + p.minute,
-    label: startDate + " 22:30 – " + endDate + " " + p.hour + ":" + p.minute + " IST"
+    active, startDate, endDate, endTime,
+    label: startDate + " 23:00 – " + endDate + " " + endTime + " IST"
   };
 }
 
@@ -1378,6 +1379,7 @@ async function rilRefreshHistoryDistances(db, latest, period, jar) {
 
 async function runRilappFeed(env) {
   const period = rilNightPeriod();
+  if (!period.active) return { skipped: true, reason: "outside 23:00–07:00 IST fetch window" };
   if (env.DB) await set(env.DB, "last_feed_attempt", new Date().toISOString());
   if (!env.RILAPP_USERNAME || !env.RILAPP_PASSWORD) {
     return { skipped: true, reason: "RILAPP_USERNAME/RILAPP_PASSWORD secrets missing" };
